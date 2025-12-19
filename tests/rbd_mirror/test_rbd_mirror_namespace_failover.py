@@ -827,7 +827,7 @@ def test_failover_non_orderly_shutdown(pri_config, sec_config, pool_types, **kw)
                     log.info(f"Successfully ran IO on promoted image {sec_image_spec}")
 
                 time.sleep(
-                    int(image_config_val["snap_schedule_intervals"][-1][:-1]) * 120
+                    int(image_config_val["snap_schedule_intervals"][-1][:-1]) * 120 + 60
                 )
 
                 # Verify the snapshot schedule for the promoted image
