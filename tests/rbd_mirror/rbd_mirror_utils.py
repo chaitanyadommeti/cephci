@@ -73,7 +73,8 @@ class RbdMirror:
                 cmd=cmd,
                 check_ec=kw.get("check_ec", True),
             )
-            log.info(f"Output of command {cmd}: {out}")
+            #log.info(f"Output of command {cmd}: {out}")
+            log.info("Output of command %s:\n%s", cmd, json.dumps(out, indent=2, ensure_ascii=False))
 
             if kw.get("output", False):
                 if isinstance(out, tuple):
