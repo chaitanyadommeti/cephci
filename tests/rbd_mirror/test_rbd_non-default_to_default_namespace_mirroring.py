@@ -1138,7 +1138,7 @@ def test_failover_and_image_operations(pri_config, sec_config, pool_types, **kw)
                 log.info(f"Renamed image {sec_image_spec} to {new_sec_image_spec}")
 
                 time.sleep(
-                    int(image_config_val["snap_schedule_intervals"][-1][:-1]) * 120
+                    int(image_config_val["snap_schedule_intervals"][-1][:-1]) * 120 + 60
                 )
 
                 out, err = rbd_primary.info(
