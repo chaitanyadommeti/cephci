@@ -1,0 +1,277 @@
+# Stretch mode tests for NVMe-oF (two-site + tie-breaker, GW locations, namespace locations, failover/failback)
+# conf: conf/tentacle/nvmeof/9-node-cluster-2-clients.yaml
+# Cluster: node1 (tiebreaker), node2-5 (DC1), node6-9 (DC2), node10-11 (client). NVMe GW: node3,4,5 (DC1), node7,8,9 (DC2)
+
+tests:
+  # - test:
+  #     name: Install ceph pre-requisites
+  #     desc: installation of ceph pre-requisites
+  #     module: install_prereq.py
+  #     abort-on-fail: true
+
+  - test:
+      name: Cephadm Bootstrap with apply-spec
+      desc: Apply spec in Bootstrap with host location attributes (DC1, DC2, tiebreaker)
+      module: test_bootstrap.py
+      polarion-id: CEPH-83575289
+      config:
+        command: bootstrap
+        base_cmd_args:
+          #verbose: true
+        args:
+          #registry-json: registry.redhat.io
+          mon-ip: node1
+          orphan-initial-daemons: true
+          skip-dashboard: true
+          ssh-user: cephuser
+          apply-spec:
+            - service_type: host
+              address: true
+              labels: apply-all-labels
+              nodes:
+                - node1
+            - service_type: host
+              address: true
+              labels: apply-all-labels
+              nodes:
+                - node2
+                - node3
+                - node4
+                - node5
+              location:
+                root: default
+                datacenter: DC1
+            - service_type: host
+              address: true
+              labels: apply-all-labels
+              nodes:
+                - node6
+                - node7
+                - node8
+                - node9
+              location:
+                root: default
+                datacenter: DC2
+            - service_type: mon
+              spec:
+                crush_locations:
+                  node1:
+                    - datacenter=tiebreaker
+                  node2:
+                    - datacenter=DC1
+                  node3:
+                    - datacenter=DC1
+                  node6:
+                    - datacenter=DC2
+                  node7:
+                    - datacenter=DC2
+              placement:
+                label: mon
+            - service_type: mgr
+              placement:
+                label: mgr
+      destroy-cluster: false
+      abort-on-fail: true
+
+  - test:
+      name: Service deployment with spec
+      desc: Add OSD services using spec file
+      module: test_cephadm.py
+      polarion-id: CEPH-83573746
+      config:
+        steps:
+          - config:
+              command: apply_spec
+              service: orch
+              validate-spec-services: true
+              specs:
+                - service_type: osd
+                  service_id: all-available-devices
+                  placement:
+                    label: osd
+                  spec:
+                    data_devices:
+                      all: "true"
+          - config:
+              command: shell
+              args:
+                - "ceph osd tree"
+      destroy-cluster: false
+      abort-on-fail: true
+
+  - test:
+      name: Configure Ceph client for NVMe tests
+      desc: Setup client on NVMEoF gateway (node10, node11)
+      module: test_client.py
+      polarion-id: CEPH-83573758
+      config:
+        command: add
+        id: client.1
+        nodes:
+          - node10
+          - node11
+        install_packages:
+          - ceph-common
+           - ceph-base
+        copy_admin_keyring: true
+      destroy-cluster: false
+      abort-on-fail: true
+
+  - test:
+      name: Deploy Two-Site Stretch Cluster with Tie-Breaker
+      desc: >
+        Define stretched CRUSH rule (ceph-base, export/decompile crush map, add rule),
+        make rule available and validate, set election strategy to connectivity,
+        enable stretch mode on tie-breaker node.
+      module: test_ceph_nvmeof_stretch_cluster.py
+      config:
+        test_case: deploy_stretch
+        stretch_rule_name: stretch_rule
+        tiebreaker_mon_site_name: tiebreaker
+        stretch_bucket: datacenter
+      destroy-cluster: false
+      abort-on-fail: true
+
+  # - test:
+  #     name: Deploy NVMe service and configure entities (3 GW per DC)
+  #     desc: >
+  #       Deploy NVMe service with 3 gateways from DC1 (node3,4,5) and 3 from DC2 (node7,8,9).
+  #       Configure subsystems, listeners, hosts, namespaces with location, initiator.
+  #     module: test_ceph_nvmeof_stretch_cluster.py
+  #     config:
+  #       test_case: deploy_nvme
+  #       rbd_pool: rbd
+  #       nvme_metadata_pool: rbd
+  #       gw_group: gw_group1
+  #       gw_nodes:
+  #         - node3
+  #         - node4
+  #         - node5
+  #         - node7
+  #         - node8
+  #         - node9
+  #       do_not_create_image: true
+  #       rep-pool-only: true
+  #       rep_pool_config:
+  #         pool: rbd
+  #       #namespace_default_location: DC1
+  #       subsystems:
+  #         - nqn: nqn.2016-06.io.spdk:stretch1
+  #           serial: "1"
+  #           # bdevs:
+  #           #   - count: 2
+  #           #     size: 2G
+  #           #     ns_create_image: true
+  #           listener_port: 4420
+  #           listeners:
+  #             - node3
+  #             - node4
+  #             - node5
+  #             - node7
+  #             - node8
+  #             - node9
+  #           allow_host: "*"
+  #       initiators:
+  #         - nqn: connect-all
+  #           listener_port: 4420
+  #           node: node10
+  #       # cleanup:
+  #       #   - pool
+  #       #   - gateway
+  #         #- initiators
+  #     destroy-cluster: false
+  #     abort-on-fail: true
+
+
+  # - test:
+  #     name: Test set/get/modify/unset GW locations
+  #     desc: >
+  #       Set location of NVMe-oF gateways for DC1 and DC2, get locations (ceph nvme-gw show),
+  #       modify location names, unset locations, set back to initial.
+  #     module: test_ceph_nvmeof_stretch_cluster.py
+  #     config:
+  #       test_case: gw_locations
+  #       rbd_pool: rbd
+  #       nvme_metadata_pool: rbd
+  #       gw_group: gw_group1
+  #       location:
+  #          DC1:
+  #           gw_nodes:
+  #             - node3
+  #             - node4
+  #             - node5           
+  #          DC2:
+  #           gw_nodes:
+  #             - node7
+  #             - node8
+  #             - node9
+  #     destroy-cluster: false
+  #     abort-on-fail: true
+
+  # - test:
+  #     name: Test add/modify namespaces with locations
+  #     desc: >
+  #       Add namespace with invalid location (verify rejected), add namespaces with valid
+  #       locations (2), change location of namespace.
+  #     module: test_ceph_nvmeof_stretch_cluster.py
+  #     config:
+  #       test_case: namespace_locations
+  #       rbd_pool: rbd
+  #       nvme_metadata_pool: rbd
+  #       gw_group: gw_group1
+  #       gw_nodes:
+  #         - node3
+  #         - node4
+  #         - node5
+  #         - node7
+  #         - node8
+  #         - node9
+  #       subsystems:
+  #         - nqn: nqn.2016-06.io.spdk:stretch1
+  #           serial: "1"
+  #           location: DC1
+  #           bdevs:
+  #             - count: 2
+  #               size: 2G
+  #               ns_create_image: true
+  #       invalid_namespace_location: INVALID_SITE
+  #       valid_namespace_locations: [DC1, DC2]
+  #       namespace_change_location_nsid: 2
+  #       namespace_new_location: DC2
+  #     destroy-cluster: false
+  #     abort-on-fail: true
+
+  # - test:
+  #     name: Single Gateway failover on DC1 and failback
+  #     desc: >
+  #       Pick namespaces served by ANA ID of gateway to fail, initiate IO, verify IO before failover.
+  #       Initiate single GW (e.g. node3) failover via systemctl stop; verify same-location GW chosen
+  #       (ceph nvme-gw show); verify load balancing groups and IO resumed (rbd du). Failback via
+  #       systemctl start; verify ANA states and IO.
+  #     module: test_ceph_nvmeof_stretch_cluster.py
+  #     config:
+  #       test_case: failover_failback
+  #       rbd_pool: nvme_pool
+  #       nvme_metadata_pool: rbd
+  #       gw_group: gw_group1
+  #       gw_nodes:
+  #         - node3
+  #         - node4
+  #         - node5
+  #         - node7
+  #         - node8
+  #         - node9
+  #       dc1_nodes: [node3, node4, node5]
+  #       dc2_nodes: [node7, node8, node9]
+  #       location_dc1: site_a
+  #       location_dc2: site_b
+  #       failover_node: node3
+  #       fault-injection-methods:
+  #         - tool: systemctl
+  #           nodes: node3
+  #       initiators:
+  #         - nqn: connect-all
+  #           listener_port: 4420
+  #           node: node10
+  #     destroy-cluster: false
+  #     abort-on-fail: true

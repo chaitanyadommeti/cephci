@@ -1,0 +1,103 @@
+# Test Suite to test CIDR blocklisting of clients + every other generic rados test suite
+# Deployment for all the ceph daemons , with 5 mon's, 5 mgr's, 36 OSD daemons & 4 Client nodes
+# 12 x OSD hosts: 10 standard, 2 backup
+globals:
+  - ceph-cluster:
+      name: ceph
+      node1:
+        networks:
+          - provider_net_cci_7
+        role:
+          - _admin
+          - mon
+          - mgr
+          - installer
+          - alertmanager
+          - grafana
+          - prometheus
+        no-of-volumes: 4
+        disk-size: 15
+      node2:
+        networks:
+          - provider_net_cci_12
+        role:
+          - mon
+          - mgr
+          - osd
+        no-of-volumes: 4
+        disk-size: 15
+      node3:
+        networks:
+          - provider_net_cci_12
+        role:
+          - mon
+          - osd
+          - nvmeof-gw
+        no-of-volumes: 4
+        disk-size: 15
+      node4:
+        networks:
+          - provider_net_cci_12
+        role:
+          - osd
+          - nvmeof-gw
+        no-of-volumes: 4
+        disk-size: 15
+      node5:
+        networks:
+          - provider_net_cci_12
+        role:
+          - osd
+          - nvmeof-gw
+        no-of-volumes: 4
+        disk-size: 15
+      node6:
+        networks:
+          - provider_net_cci_14
+        role:
+          - mon
+          - mgr
+          - osd
+        no-of-volumes: 4
+        disk-size: 15
+      node7:
+        networks:
+          - provider_net_cci_14
+        role:
+          - mon
+          - osd
+          - nvmeof-gw
+        no-of-volumes: 4
+        disk-size: 15
+      node8:
+        networks:
+          - provider_net_cci_14
+        role:
+          - osd
+          - nvmeof-gw
+        no-of-volumes: 4
+        disk-size: 15
+      node9:
+        networks:
+          - provider_net_cci_14
+        role:
+          - osd
+          - nvmeof-gw
+        no-of-volumes: 4
+        disk-size: 15
+      node10:
+        networks:
+          - provider_net_cci_16
+        id: node10
+        role:
+          - client
+        no-of-volumes: 4
+        disk-size: 15
+      node11:
+        networks:
+          - provider_net_cci_16
+        id: node11
+        role:
+          - client
+        no-of-volumes: 4
+        disk-size: 15 

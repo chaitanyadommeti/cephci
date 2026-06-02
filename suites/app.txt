@@ -1,0 +1,1010 @@
+from flask import Flask, render_template_string, request, jsonify
+import subprocess, threading, os, yaml, tempfile, uuid, re
+import urllib.request
+
+app = Flask(__name__)
+logs = []
+
+HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>Ceph NVMe UI</title>
+<style>
+#cmd_preview {border:2px solid #444;padding:10px;background:#f4f4f4;white-space:pre-wrap;}
+</style>
+</head>
+<body>
+
+<h2>CephCI Test Launcher</h2>
+
+<label>CephCI Path:</label>
+<input id="root" value="{{ cephci_root }}">
+<button onclick="loadAll()">Load</button><br><br>
+
+<label>Log Level:</label>
+<select id="log_level">
+<option value="DEBUG">DEBUG</option>
+<option value="INFO">INFO</option>
+<option value="WARNING">WARNING</option>
+<option value="ERROR">ERROR</option>
+</select>
+
+<label>Cloud:</label>
+<input id="cloud" value="openstack" placeholder="openstack">
+
+<label>Instances Name:</label>
+<input id="instances_name" placeholder="cd_nvme_str"><br><br>
+
+<label>Mode:</label>
+<select id="mode" onchange="toggleMode()">
+<option value="fresh">New</option>
+<option value="rerun">Rerun</option>
+</select>
+
+<div id="reuse_div" style="display:none;">
+<select id="reuse_file"></select>
+</div><br>
+
+<label>Conf Folder:</label>
+<select id="conf_folder" onchange="loadFiles('conf')"></select>
+
+<label>Global Config:</label>
+<select id="global_conf"></select><br>
+
+<label>Suite Folder:</label>
+<select id="suite_folder" onchange="loadFiles('suite')"></select>
+
+<label>Suite File:</label>
+<select id="suite" onchange="loadTests()"></select><br><br>
+
+<div id="tests"></div><br>
+
+<label>Inventory:</label>
+<select id="inventory"></select><br><br>
+
+<label>Ceph Version:</label>
+<select id="ceph_version" onchange="onCephVersionChange()">
+<option value="">-- Select --</option>
+<option value="8.1">8.1</option>
+<option value="9.0">9.0</option>
+<option value="9.1">9.1</option>
+</select>
+
+<span id="rhel_span"><label>RHEL (for repo):</label>
+<select id="rhel_repo" onchange="onCephVersionChange()">
+<option value="rhel-9">rhel-9</option>
+<option value="rhel-10">rhel-10</option>
+</select></span><br><br>
+
+<label>Build / Image Dump (paste YAML, logs, or key=value):</label>
+<textarea id="input_dump" rows="6" placeholder="Paste manifest snippet, build output, or image list (e.g. ceph-base: cp.stg.icr.io/..., nvmeof_image: ...)"></textarea>
+<button type="button" onclick="extractFromDump()">Extract</button><br><br>
+
+<label>Full Image (ceph-base):</label>
+<input id="full_image" onchange="parseFullImage()"><br>
+
+<label>Docker Registry:</label>
+<input id="docker_registry" placeholder="cp.stg.icr.io">
+
+<label>Docker Image:</label>
+<input id="docker_image" placeholder="cp/ibm-ceph/ceph-9-rhel9">
+
+<label>Docker Tag:</label>
+<input id="docker_tag" placeholder="v9.1-12786"><br><br>
+
+<label>NVMeOF CLI Image:</label>
+<input id="nvmeof_cli_image"><br>
+
+<label>NVMeOF Target Image:</label>
+<input id="nvmeof_image"><br>
+
+<label>RHS Repo:</label>
+<input id="rhs_repo"><br><br>
+
+<label>RH Build:</label>
+<input id="rhbuild" placeholder="9.1">
+
+<label>Platform:</label>
+<select id="platform">
+<option value="rhel-9">rhel-9</option>
+<option value="rhel-10">rhel-10</option>
+</select>
+
+<label>OSP Cred:</label>
+<input id="osp_cred" placeholder="~/creds/osp-cred-ci.yaml"><br><br>
+
+<label><input type="checkbox" id="skip_subscription"> Skip subscription</label>
+
+<label>Extra custom-config (key=value per line):</label>
+<textarea id="extra_custom_config" rows="2" placeholder="ibm-build=True"></textarea><br><br>
+
+<button onclick="preview()">Preview</button>
+<button onclick="runTest()">Run</button>
+
+<h3>Command</h3>
+<button type="button" onclick="copyCommand()">Copy command</button>
+<span id="copy_feedback" style="margin-left:8px;color:green;font-size:0.9em;"></span>
+<div id="cmd_preview"></div>
+
+<h3>Logs</h3>
+<div id="logs"></div>
+
+<script>
+
+// ---------- Populate ----------
+function populate(id, items) {
+    // #region agent log
+    var _el = document.getElementById(id);
+    fetch('http://127.0.0.1:7421/ingest/2dcbf41d-b9d5-4683-86ef-a2dd1500f48c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9cdc68'},body:JSON.stringify({sessionId:'9cdc68',location:'populate',message:'populate called',data:{id:id,elNull:!_el,itemsLen:items?items.length:0,firstPath:items&&items[0]?items[0].path:null,firstName:items&&items[0]?items[0].name:null},timestamp:Date.now(),hypothesisId:'H5'})}).catch(function(){});
+    // #endregion
+    var el = _el;
+    if (!el) return;
+    el.innerHTML = '';
+    if (!items || !items.length) return;
+    for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        if (!it || (it.path === undefined && it.name === undefined)) continue;
+        var o = document.createElement('option');
+        o.value = it.path != null ? it.path : '';
+        o.text = it.name != null ? it.name : '';
+        el.appendChild(o);
+    }
+}
+
+// ---------- Load All ----------
+function loadAll() {
+    var rootVal = document.getElementById('root').value;
+    // #region agent log
+    fetch('http://127.0.0.1:7421/ingest/2dcbf41d-b9d5-4683-86ef-a2dd1500f48c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9cdc68'},body:JSON.stringify({sessionId:'9cdc68',location:'loadAll',message:'loadAll start',data:{rootValLen:rootVal?rootVal.length:0},timestamp:Date.now(),hypothesisId:'H3'})}).catch(function(){});
+    // #endregion
+    raise Exception("Debug here")
+    fetch('/list-all', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({root: rootVal})
+    })
+    .then(function(r) {
+        // #region agent log
+        fetch('http://127.0.0.1:7421/ingest/2dcbf41d-b9d5-4683-86ef-a2dd1500f48c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9cdc68'},body:JSON.stringify({sessionId:'9cdc68',location:'loadAll.then',message:'list-all response',data:{ok:r.ok,status:r.status},timestamp:Date.now(),hypothesisId:'H3'})}).catch(function(){});
+        // #endregion
+        return r.json();
+    })
+    .then(function(d) {
+        // #region agent log
+        var hasConf = d && d.hasOwnProperty('conf'); var confLen = d && d.conf ? d.conf.length : -1;
+        fetch('http://127.0.0.1:7421/ingest/2dcbf41d-b9d5-4683-86ef-a2dd1500f48c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9cdc68'},body:JSON.stringify({sessionId:'9cdc68',location:'loadAll.then2',message:'list-all data',data:{hasConf:hasConf,confLen:confLen,suiteLen:d&&d.suite?d.suite.length:-1,invLen:d&&d.inventory?d.inventory.length:-1},timestamp:Date.now(),hypothesisId:'H4'})}).catch(function(){});
+        // #endregion
+        populate('conf_folder', d.conf || []);
+        populate('suite_folder', d.suite || []);
+        populate('inventory', d.inventory || []);
+    });
+}
+
+// ---------- Load Files ----------
+function loadFiles(type){
+    var folder = type === 'conf' ? document.getElementById('conf_folder').value : document.getElementById('suite_folder').value;
+    if (!folder) return;
+    fetch('/list-files',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({folder: folder})
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+        populate(type==='conf'?'global_conf':'suite', d || []);
+    });
+}
+
+// ---------- Load Tests ----------
+function esc(s){
+    if (typeof s !== 'string') return '';
+    const div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+}
+function loadTests(){
+    const suitePath = document.getElementById('suite').value;
+    if (!suitePath) { document.getElementById('tests').innerHTML = ''; return; }
+    fetch('/parse-suite',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({file:suitePath})
+    })
+    .then(r=>r.json())
+    .then(tests=>{
+        let html = '';
+        tests.forEach(t=>{
+            const safe = esc(t);
+            html += '<label><input type="checkbox" checked value="' + safe + '"> ' + safe + '</label><br>';
+        });
+        document.getElementById('tests').innerHTML = html || '<em>No tests found</em>';
+    });
+}
+
+// ---------- Mode ----------
+function toggleMode(){
+    const modeSel = document.getElementById('mode');
+    const reuseDiv = document.getElementById('reuse_div');
+    if (modeSel.value === 'rerun'){
+        reuseDiv.style.display = 'block';
+        const rootPath = document.getElementById('root').value;
+        fetch('/list-reuse',{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({root:rootPath})
+        })
+        .then(r=>r.json())
+        .then(d=>{
+            if (!d || d.length === 0) {
+                const el = document.getElementById('reuse_file');
+                el.innerHTML = '<option value="">-- No rerun files (run with Fresh + Store first) --</option>';
+            } else {
+                populate('reuse_file', d);
+            }
+        });
+    } else {
+        reuseDiv.style.display = 'none';
+    }
+}
+
+// ---------- Parse full image into docker registry, image, tag ----------
+function parseFullImage(){
+    const s = document.getElementById('full_image').value.trim();
+    if (!s) return;
+    const i = s.indexOf('/');
+    if (i === -1) return;
+    const registry = s.substring(0, i);
+    const rest = s.substring(i + 1);
+    const j = rest.lastIndexOf(':');
+    if (j === -1) return;
+    document.getElementById('docker_registry').value = registry;
+    document.getElementById('docker_image').value = rest.substring(0, j);
+    document.getElementById('docker_tag').value = rest.substring(j + 1);
+}
+
+function collect(){
+    const selectedTests = [];
+    document.querySelectorAll('#tests input[type="checkbox"]').forEach(c=>{
+        if (c.checked) selectedTests.push(c.value);
+    });
+    return {
+        root: document.getElementById('root').value,
+        mode: document.getElementById('mode').value,
+        reuse_file: document.getElementById('reuse_file').value,
+        log_level: document.getElementById('log_level').value,
+        cloud: document.getElementById('cloud').value,
+        instances_name: document.getElementById('instances_name').value,
+        full_image: document.getElementById('full_image').value,
+        docker_registry: document.getElementById('docker_registry').value,
+        docker_image: document.getElementById('docker_image').value,
+        docker_tag: document.getElementById('docker_tag').value,
+        nvmeof_cli_image: document.getElementById('nvmeof_cli_image').value,
+        nvmeof_image: document.getElementById('nvmeof_image').value,
+        rhs_repo: document.getElementById('rhs_repo').value,
+        rhbuild: document.getElementById('rhbuild').value,
+        platform: document.getElementById('platform').value,
+        osp_cred: document.getElementById('osp_cred').value,
+        skip_subscription: document.getElementById('skip_subscription').checked,
+        extra_custom_config: document.getElementById('extra_custom_config').value.trim(),
+        global_conf: document.getElementById('global_conf').value,
+        suite: document.getElementById('suite').value,
+        inventory: document.getElementById('inventory').value,
+        tests: selectedTests
+    };
+}
+
+// ---------- Extract from dump (client-side so it always works) ----------
+function setField(id, val) {
+    var el = document.getElementById(id);
+    // #region agent log
+    if (id === 'full_image' || id === 'nvmeof_cli_image') fetch('http://127.0.0.1:7421/ingest/2dcbf41d-b9d5-4683-86ef-a2dd1500f48c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9cdc68'},body:JSON.stringify({sessionId:'9cdc68',location:'setField',message:'setField',data:{id:id,elNull:!el,valLen:val!=null?String(val).length:0},timestamp:Date.now(),hypothesisId:'E3'})}).catch(function(){});
+    // #endregion
+    if (!el) return;
+    el.value = (val != null && val !== undefined) ? String(val) : '';
+}
+function parseFullImageToParts(fullImage) {
+    var s = (fullImage || '').trim();
+    if (!s) return { reg: '', img: '', tag: '' };
+    var i = s.indexOf('/');
+    if (i === -1) return { reg: s, img: '', tag: '' };
+    var reg = s.substring(0, i);
+    var rest = s.substring(i + 1);
+    var j = rest.lastIndexOf(':');
+    if (j === -1) return { reg: reg, img: rest, tag: '' };
+    return { reg: reg, img: rest.substring(0, j), tag: rest.substring(j + 1) };
+}
+function parseDumpInBrowser(dump) {
+    var out = {};
+    var text = (dump || '').trim();
+    if (!text) return out;
+    var imageRe = /[a-zA-Z0-9][a-zA-Z0-9._-]*\/[a-zA-Z0-9\/._-]+:[a-zA-Z0-9._-]+/;
+    var imageReLoose = /\S+\/\S+:\S+/;
+    var lines = text.split(/\r?\n/);
+    for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line) continue;
+        if (line.indexOf('://') !== -1 && line.indexOf('.repo') !== -1) continue;
+        var m = line.match(imageRe) || line.match(imageReLoose);
+        if (!m || !m[0]) continue;
+        var img = m[0].trim();
+        var low = img.toLowerCase();
+        if (low.indexOf('nvmeof-cli') !== -1 || low.indexOf('nvmeof_cli') !== -1) {
+            out.nvmeof_cli_image = img;
+        } else if (low.indexOf('nvmeof') !== -1 && low.indexOf('cli') === -1) {
+            out.nvmeof_image = img;
+        } else if ((low.indexOf('ceph-9') !== -1 || low.indexOf('ceph-8') !== -1) && low.indexOf('crimson') === -1) {
+            out.full_image = img;
+        } else if (low.indexOf('ceph') !== -1 && low.indexOf('rhel') !== -1 && low.indexOf('crimson') === -1 && !out.full_image) {
+            out.full_image = img;
+        }
+    }
+    if (out.full_image) {
+        var parts = parseFullImageToParts(out.full_image);
+        if (parts.reg) out.docker_registry = parts.reg;
+        if (parts.img) out.docker_image = parts.img;
+        if (parts.tag) out.docker_tag = parts.tag;
+    }
+    var repoUrlMatch = text.match(/https?:\/\/[^\s<>'"]+\.repo/);
+    if (repoUrlMatch) {
+        out.rhs_repo = repoUrlMatch[0].trim();
+    } else {
+        var baseUrlMatch = text.match(/https?:\/\/[^\s<>'")]+/);
+        if (baseUrlMatch) {
+            var baseUrl = baseUrlMatch[0].trim();
+            if (baseUrl.toLowerCase().indexOf('ceph') !== -1 || baseUrl.toLowerCase().indexOf('ibm') !== -1) {
+                baseUrl = baseUrl.replace(/\/+$/, '');
+                var segs = baseUrl.split('/');
+                var lastSeg = segs[segs.length - 1] || '';
+                if (lastSeg && lastSeg.indexOf('.') !== -1) {
+                    out.rhs_repo = baseUrl + '/' + lastSeg + '-rhel10.repo';
+                    out.rhs_repo_rhel9 = baseUrl + '/' + lastSeg + '-rhel9.repo';
+                }
+            }
+        }
+    }
+    return out;
+}
+function extractFromDump() {
+    var dumpEl = document.getElementById('input_dump');
+    var dump = dumpEl ? dumpEl.value.trim() : '';
+    // #region agent log
+    fetch('http://127.0.0.1:7421/ingest/2dcbf41d-b9d5-4683-86ef-a2dd1500f48c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9cdc68'},body:JSON.stringify({sessionId:'9cdc68',location:'extractFromDump',message:'extract start',data:{dumpElNull:!dumpEl,dumpLen:dump?dump.length:0},timestamp:Date.now(),hypothesisId:'E1'})}).catch(function(){});
+    // #endregion
+    if (!dump) return;
+    var d = parseDumpInBrowser(dump);
+    // #region agent log
+    var keys = []; for (var k in d) if (d.hasOwnProperty(k)) keys.push(k);
+    fetch('http://127.0.0.1:7421/ingest/2dcbf41d-b9d5-4683-86ef-a2dd1500f48c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9cdc68'},body:JSON.stringify({sessionId:'9cdc68',location:'extractFromDump',message:'parseDump result',data:{keys:keys,full_image:!!d.full_image},timestamp:Date.now(),hypothesisId:'E2'})}).catch(function(){});
+    // #endregion
+    setField('full_image', d.full_image);
+    setField('nvmeof_cli_image', d.nvmeof_cli_image);
+    setField('nvmeof_image', d.nvmeof_image);
+    var repo = d.rhs_repo;
+    if (document.getElementById('platform').value === 'rhel-9' && d.rhs_repo_rhel9) repo = d.rhs_repo_rhel9;
+    setField('rhs_repo', repo);
+    setField('docker_registry', d.docker_registry);
+    setField('docker_image', d.docker_image);
+    setField('docker_tag', d.docker_tag);
+    if (d.full_image && typeof parseFullImage === 'function') parseFullImage();
+}
+
+// ---------- Ceph Version: fetch RHS Repo and images from manifest ----------
+function onCephVersionChange(){
+    const ver = document.getElementById('ceph_version').value;
+    if (ver !== '9.0' && ver !== '9.1') return;
+    const rhel = document.getElementById('rhel_repo').value;
+    const set = function(id, val) {
+        const el = document.getElementById(id);
+        if (el) el.value = (val != null && val !== undefined) ? String(val) : '';
+    };
+    fetch('/manifest/' + ver + '?rhel=' + encodeURIComponent(rhel))
+        .then(function(r) { return r.ok ? r.json() : r.json().then(function(j) { throw new Error(j.error || 'Failed'); }); })
+        .then(function(d) {
+            set('rhs_repo', d && d.rhs_repo);
+            set('full_image', d && d.full_image);
+            set('nvmeof_cli_image', d && d.nvmeof_cli_image);
+            set('nvmeof_image', d && d.nvmeof_image);
+            document.getElementById('rhbuild').value = ver;
+            parseFullImage();
+        })
+        .catch(function() {
+            set('rhs_repo', '');
+            set('full_image', '');
+            set('nvmeof_cli_image', '');
+            set('nvmeof_image', '');
+        });
+}
+
+// ---------- Copy command to clipboard ----------
+function copyCommand(){
+    var el = document.getElementById('cmd_preview');
+    var feedback = document.getElementById('copy_feedback');
+    if (!el || !el.innerText || !el.innerText.trim()) {
+        if (feedback) feedback.textContent = 'Generate command first (click Preview).';
+        return;
+    }
+    navigator.clipboard.writeText(el.innerText.trim()).then(function(){
+        if (feedback) { feedback.textContent = 'Copied!'; feedback.style.color = 'green'; }
+        setTimeout(function(){ if (feedback) feedback.textContent = ''; }, 2000);
+    }).catch(function(){
+        if (feedback) { feedback.textContent = 'Copy failed'; feedback.style.color = 'red'; }
+    });
+}
+
+// ---------- Preview (creates temp suite and shows real path) ----------
+function preview(){
+    const d = collect();
+    const el = document.getElementById('cmd_preview');
+    if (!d.suite || (d.tests && d.tests.length === 0)) {
+        if (el) el.innerText = 'Select a suite and at least one test.';
+        return;
+    }
+    fetch('/preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(d)
+    })
+    .then(r=>r.json())
+    .then(data=>{
+        if (data.error) { if (el) el.innerText = data.error; return; }
+        if (el) el.innerText = data.command || '';
+    })
+    .catch(()=>{ if (el) el.innerText = 'Preview failed.'; });
+}
+
+// ---------- Run ----------
+function runTest(){
+    fetch('/run',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(collect())
+    });
+}
+
+// ---------- Logs ----------
+setInterval(()=>{
+    fetch('/logs')
+    .then(r=>r.json())
+    .then(d=>{
+        const el = document.getElementById('logs');
+        if (el) el.innerText = (d && d.length) ? d.join('') : '';
+    });
+}, 2000);
+
+</script>
+
+</body>
+</html>
+"""
+
+# ---------- Backend ----------
+
+def full(p):
+    return os.path.expanduser(p) if p else ""
+
+
+def parse_full_image(full_image):
+    """Parse full image (e.g. cp.stg.icr.io/cp/ibm-ceph/ceph-9-rhel9:v9.1-12786) into registry, image, tag."""
+    s = (full_image or "").strip()
+    if not s:
+        return "", "", ""
+    i = s.find("/")
+    if i == -1:
+        return s, "", ""
+    registry = s[:i]
+    rest = s[i + 1 :]
+    j = rest.rfind(":")
+    if j == -1:
+        return registry, rest, ""
+    return registry, rest[:j], rest[j + 1 :]
+
+def list_dirs(base):
+    
+    if not os.path.exists(base): return []
+    return [{"name":d,"path":os.path.join(base,d)} for d in os.listdir(base) if os.path.isdir(os.path.join(base,d))]
+
+def list_yaml(folder):
+    if not os.path.exists(folder):
+        return []
+    return [{"name":f,"path":os.path.join(folder,f)} for f in os.listdir(folder) if f.endswith(('.yaml','.yml'))]
+
+@app.route('/')
+def index():
+    cephci_root = os.path.dirname(os.path.abspath(__file__))
+    return render_template_string(HTML, cephci_root=cephci_root)
+
+@app.route('/list-all', methods=['POST'])
+def list_all():
+    data = request.get_json(force=True, silent=True) or {}
+    root = full(data.get('root', ''))
+    if not root:
+        root = os.path.dirname(os.path.abspath(__file__))
+    conf_path = os.path.join(root, 'conf/tentacle')
+    suite_path = os.path.join(root, 'suites/tentacle')
+    inv_path = os.path.join(root, 'conf/inventory')
+    conf_list = list_dirs(conf_path)
+    suite_list = list_dirs(suite_path)
+    inv_list = list_yaml(inv_path)
+    # #region agent log
+    _logpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cursor", "debug-9cdc68.log")
+    try:
+        os.makedirs(os.path.dirname(_logpath), exist_ok=True)
+        with open(_logpath, "a") as _log:
+            import json as _j
+            _log.write(_j.dumps({"sessionId": "9cdc68", "location": "list_all", "message": "list_all", "data": {"root": root, "conf_path": conf_path, "conf_len": len(conf_list), "suite_len": len(suite_list), "inv_len": len(inv_list), "conf_path_exists": os.path.exists(conf_path)}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H1"}) + "\n")
+    except Exception:
+        pass
+    # #endregion
+    return jsonify({
+        "conf": conf_list,
+        "suite": suite_list,
+        "inventory": inv_list,
+    })
+
+@app.route('/list-files', methods=['POST'])
+def files():
+    data = request.get_json(force=True, silent=True) or {}
+    folder = data.get('folder', '')
+    import pdb; pdb.set_trace()
+    path = full(folder) if folder else ''
+    result = list_yaml(path) if path else []
+    # #region agent log
+    _logpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cursor", "debug-9cdc68.log")
+    try:
+        os.makedirs(os.path.dirname(_logpath), exist_ok=True)
+        with open(_logpath, "a") as _log:
+            import json as _j
+            _log.write(_j.dumps({"sessionId": "9cdc68", "location": "list-files", "message": "list-files", "data": {"folder": folder, "path": path, "path_exists": os.path.exists(path) if path else False, "result_len": len(result)}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H1"}) + "\n")
+    except Exception:
+        pass
+    # #endregion
+    return jsonify(result)
+
+
+# ---------- Parse dump: extract images and repo from pasted text ----------
+def _normalize_image(val):
+    if val is None or (isinstance(val, str) and val.strip().lower() in ("none", "")):
+        return ""
+    s = (val or "").strip()
+    return s
+
+
+def _extract_from_yaml(data, out, prefix=""):
+    """Recursively extract known keys from dict/list."""
+    if isinstance(data, dict):
+        for k, v in data.items():
+            key = (prefix + "." + k if prefix else k).lower().replace("-", "_")
+            if key in ("ceph_base", "ceph-base") and v:
+                out["full_image"] = _normalize_image(v)
+            elif key in ("nvmeof_cli_image", "nvmeof-cli-image") and v:
+                out["nvmeof_cli_image"] = _normalize_image(v)
+            elif key in ("nvmeof_image", "nvmeof-image") and v:
+                out["nvmeof_image"] = _normalize_image(v)
+            elif key == "default" and isinstance(v, dict) and "rhel" in str(v).lower():
+                for rhel_k, repo_url in v.items():
+                    if isinstance(repo_url, str) and ".repo" in repo_url:
+                        out.setdefault("rhs_repo", repo_url)
+            elif isinstance(v, str) and ".repo" in v and ("repos" in key or "repo" in key or "rhel" in key):
+                out["rhs_repo"] = _normalize_image(v)
+            if isinstance(v, (dict, list)):
+                _extract_from_yaml(v, out, key)
+    elif isinstance(data, list):
+        for item in data:
+            _extract_from_yaml(item, out, prefix)
+
+
+# Image: registry/path:tag - permissive (tag can contain digits, dots, hyphens)
+_IMAGE_RE = re.compile(
+    r"(?P<image>[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9/._-]+:[a-zA-Z0-9./_-]+)"
+)
+
+# Any HTTP URL (candidate repo directory; may end with / or a segment like .ci.0)
+_REPO_BASE_URL_RE = re.compile(r"(https?://[^\s<>'\")\]]+)")
+
+# Direct .repo URL
+_REPO_URL_RE = re.compile(r"https?://[^\s<>'\"]+\.repo")
+
+# key: value or key=value (value = rest of line or single token)
+_KV_LINE_RE = re.compile(
+    r"^\s*(?P<key>ceph-base|ceph_base|full_image|nvmeof_cli_image|nvmeof_image|rhs.repo|rhs_ceph_repo)"
+    r"\s*[:=]\s*(?P<val>.+)$",
+    re.IGNORECASE,
+)
+
+
+def parse_dump(dump_text):
+    """Extract full_image, nvmeof_cli_image, nvmeof_image, rhs_repo from pasted dump."""
+    out = {}
+    text = (dump_text or "").strip()
+    if not text:
+        return out
+
+    # 0) Line-by-line container list (e.g. "  cp.stg.icr.io/cp/ibm-ceph/ceph-9-rhel9:v9.1-12786")
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or "://" in line and ".repo" in line:
+            continue
+        m = _IMAGE_RE.search(line)
+        if not m:
+            continue
+        img = m.group("image").strip()
+        if not img or img.count("/") < 1 or ":" not in img:
+            continue
+        low = img.lower()
+        if "nvmeof-cli" in low or "nvmeof_cli" in low:
+            out["nvmeof_cli_image"] = img
+        elif "nvmeof" in low and "cli" not in low:
+            out["nvmeof_image"] = img
+        elif ("ceph-9" in low or "ceph-8" in low) and "crimson" not in low:
+            out["full_image"] = img
+        elif "ceph" in low and "rhel" in low and "crimson" not in low and "full_image" not in out:
+            out["full_image"] = img
+
+    # 1) Try YAML (full or partial) - only if we didn't get images from line-by-line
+    if not out:
+        try:
+            data = yaml.safe_load(text)
+            if data:
+                _extract_from_yaml(data, out)
+        except Exception:
+            pass
+
+    # 2) Key: value / key=value (line-by-line)
+    for line in text.splitlines():
+        m = _KV_LINE_RE.match(line.strip())
+        if not m:
+            continue
+        key = m.group("key").lower().replace("-", "_")
+        val = m.group("val").strip().strip("'\"").split()[0] if m.group("val") else ""
+        val = _normalize_image(val)
+        if not val:
+            continue
+        if "ceph" in key or key == "full_image":
+            out["full_image"] = val
+        elif "nvmeof_cli" in key:
+            out["nvmeof_cli_image"] = val
+        elif "nvmeof_image" in key:
+            out["nvmeof_image"] = val
+        elif "repo" in key:
+            out["rhs_repo"] = val
+
+    # 3) Loose key: value (common keys)
+    for line in text.splitlines():
+        line = line.strip()
+        for sep in (":", "="):
+            if sep not in line:
+                continue
+            idx = line.index(sep)
+            k = line[:idx].strip().lower().replace("-", "_")
+            v = line[idx + 1 :].strip().strip("'\"").split()[0]
+            if not v or "://" in k:
+                continue
+            if k in ("ceph_base", "ceph-base", "full_image") and "/" in v and ":" in v:
+                out["full_image"] = _normalize_image(v)
+            elif k in ("nvmeof_cli_image", "nvmeof_cli") and "/" in v:
+                out["nvmeof_cli_image"] = _normalize_image(v)
+            elif k in ("nvmeof_image", "nvmeof") and "/" in v and "cli" not in v.lower():
+                out["nvmeof_image"] = _normalize_image(v)
+            break
+
+    # 4) Direct .repo URLs
+    for m in _REPO_URL_RE.finditer(text):
+        out["rhs_repo"] = m.group(0).strip()
+
+    # 4b) Repo directory base URL (e.g. "RHEL repos here: https://.../IBM-CEPH-9.1-202603162056.ci.0/")
+    #     Construct .repo links: base + last_segment + "-rhel9.repo" / "-rhel10.repo"
+    if "rhs_repo" not in out or not out.get("rhs_repo"):
+        for m in _REPO_BASE_URL_RE.finditer(text):
+            base_url = m.group(1).strip()
+            if "ceph" not in base_url.lower() and "ibm" not in base_url.lower():
+                continue
+            base_url = base_url.rstrip("/")
+            last_segment = base_url.split("/")[-1] if "/" in base_url else ""
+            if not last_segment or "." not in last_segment:
+                continue
+            base_url += "/"
+            out["rhs_repo"] = base_url + last_segment + "-rhel10.repo"
+            out["rhs_repo_rhel9"] = base_url + last_segment + "-rhel9.repo"
+            break
+
+    # 5) Standalone image (fallback: find anywhere in text)
+    for m in _IMAGE_RE.finditer(text):
+        img = m.group("image").strip()
+        if not img or img.count("/") < 1 or ":" not in img:
+            continue
+        low = img.lower()
+        if "nvmeof-cli" in low or "nvmeof_cli" in low:
+            out.setdefault("nvmeof_cli_image", img)
+        elif "nvmeof" in low and "cli" not in low:
+            out.setdefault("nvmeof_image", img)
+        elif ("ceph-9" in low or "ceph-8" in low or "ceph_base" in low or ("ceph" in low and "rhel" in low)) and "crimson" not in low:
+            out.setdefault("full_image", img)
+
+    # Ensure docker fields from full_image
+    if out.get("full_image"):
+        reg, img, tag = parse_full_image(out["full_image"])
+        if reg:
+            out["docker_registry"] = reg
+        if img:
+            out["docker_image"] = img
+        if tag:
+            out["docker_tag"] = tag
+
+    return out
+
+
+@app.route("/parse-dump", methods=["POST"])
+def parse_dump_route():
+    try:
+        data = request.get_json(silent=True) or {}
+        dump = data.get("dump", "")
+        if isinstance(dump, str):
+            result = parse_dump(dump)
+        else:
+            result = {}
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+def _test_name(entry):
+    """Extract display name from a suite test entry (supports nested test: { name: ... })."""
+    if not isinstance(entry, dict):
+        return str(entry)
+    inner = entry.get('test') or entry
+    if not isinstance(inner, dict):
+        return str(entry)
+    return (
+        inner.get('name') or
+        inner.get('test') or
+        inner.get('desc') or
+        str(entry)
+    )
+
+
+# ---------- FIXED PARSER ----------
+@app.route('/parse-suite', methods=['POST'])
+def parse_suite():
+    file = request.json.get('file')
+    tests = []
+    if not file or not os.path.isfile(full(file)):
+        return jsonify(tests)
+
+    try:
+        with open(full(file)) as f:
+            data = yaml.safe_load(f)
+        if not data:
+            return jsonify(tests)
+        for t in data.get('tests', []):
+            tests.append(_test_name(t))
+    except Exception as e:
+        print("Parse error:", e)
+
+    return jsonify(tests)
+
+# ---------- RERUN: list files in rerun/ (stored pickle state from --store) ----------
+def list_rerun_files(rerun_dir):
+    if not os.path.isdir(rerun_dir):
+        return []
+    return [
+        {"name": f, "path": os.path.join(rerun_dir, f)}
+        for f in os.listdir(rerun_dir)
+        if os.path.isfile(os.path.join(rerun_dir, f))
+    ]
+
+
+@app.route('/list-reuse', methods=['POST'])
+def list_reuse():
+    root = full(request.json.get('root', ''))
+    rerun_path = os.path.join(root, 'rerun')
+    if not os.path.exists(rerun_path):
+        os.makedirs(rerun_path, exist_ok=True)
+    return jsonify(list_rerun_files(rerun_path))
+
+# ---------- Manifest: fetch RHS Repo (and NVMe images) from qe-ceph-manifest ----------
+MANIFEST_BASE = "https://raw.githubusercontent.com/ibmstorage/qe-ceph-manifest/main/ibm"
+
+def _fetch_manifest(version):
+    url = f"{MANIFEST_BASE}/{version}.yaml"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; CephCI/1.0)"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return yaml.safe_load(r.read())
+    except Exception:
+        return None
+
+def _safe_image(val):
+    if val is None or (isinstance(val, str) and val.strip().lower() == "none"):
+        return ""
+    return (val or "").strip()
+
+@app.route('/manifest/<version>')
+def manifest(version):
+    rhel = request.args.get('rhel', 'rhel-9')
+    if version not in ('9.0', '9.1'):
+        return jsonify({})
+    data = _fetch_manifest(version)
+    if not data:
+        return jsonify({"error": "Could not fetch manifest"})
+    # Use stable if present, else nightly (from default section for repo)
+    channel = "stable" if "stable" in data else "nightly"
+    channel_data = data.get(channel) or {}
+    repos = channel_data.get("repositories", {}).get("default", {})
+    rhs_repo = (repos or {}).get(rhel) or ""
+    images = channel_data.get("images") or {}
+    return jsonify({
+        "rhs_repo": rhs_repo,
+        "full_image": _safe_image(images.get("ceph-base")),
+        "nvmeof_cli_image": _safe_image(images.get("nvmeof_cli_image")),
+        "nvmeof_image": _safe_image(images.get("nvmeof_image")),
+    })
+
+# ---------- TEMP SUITE ----------
+last_preview_temp = None  # cleaned up when a new preview is created
+
+def create_temp_suite(orig_file, selected_names):
+    selected = set(selected_names or [])
+    with open(full(orig_file)) as f:
+        data = yaml.safe_load(f)
+    if not data:
+        data = {'tests': []}
+    filtered = []
+    for t in data.get('tests', []):
+        if _test_name(t) in selected:
+            filtered.append(t)
+    data['tests'] = filtered
+
+    # Temp name resembles selected suite: e.g. tier-2_nvmeof_stretch_cluster_subset_a1b2c3d4.yaml
+    base = os.path.splitext(os.path.basename(orig_file))[0]
+    safe_base = "".join(c if c.isalnum() or c in "-_" else "_" for c in base)
+    short_id = uuid.uuid4().hex[:8]
+    tmp = os.path.join(tempfile.gettempdir(), f"{safe_base}_subset_{short_id}.yaml")
+
+    with open(tmp, 'w') as f:
+        yaml.dump(data, f)
+
+    return tmp
+
+def _rel_path(path, root):
+    """Return path relative to root if under root, else absolute."""
+    if not path:
+        return path
+    path = full(path)
+    root = os.path.normpath(root)
+    try:
+        rel = os.path.relpath(path, root)
+        if not rel.startswith(".."):
+            return rel
+    except ValueError:
+        pass
+    return path
+
+
+def _build_command_args(d, temp_suite_path, root):
+    """Build argv list for run.py (without creating temp suite)."""
+    global_conf = full(d.get("global_conf") or "")
+    inventory = full(d.get("inventory") or "")
+    reuse_file = full(d.get("reuse_file") or "") if d.get("reuse_file") else ""
+    osp_cred = full(d.get("osp_cred") or "")
+    cmd = ["python3", "run.py"]
+    if d.get("log_level"):
+        cmd += ["--log-level", d["log_level"]]
+    if d.get("cloud"):
+        cmd += ["--cloud", d["cloud"]]
+    if d.get("instances_name"):
+        cmd += ["--instances-name", d["instances_name"]]
+    if d.get("rhbuild"):
+        cmd += ["--rhbuild", d["rhbuild"]]
+    if d.get("platform"):
+        cmd += ["--platform", d["platform"]]
+    cmd += [
+        "--global-conf", _rel_path(d.get("global_conf"), root) or global_conf,
+        "--suite", temp_suite_path,
+        "--inventory", _rel_path(d.get("inventory"), root) or inventory,
+    ]
+    if osp_cred:
+        cmd += ["--osp-cred", osp_cred]
+    if d.get("nvmeof_image"):
+        cmd += ["--custom-config", "nvmeof_image=" + d["nvmeof_image"]]
+    if d.get("nvmeof_cli_image"):
+        cmd += ["--custom-config", "nvmeof_cli_image=" + d["nvmeof_cli_image"]]
+    if d.get("rhs_repo"):
+        cmd += ["--rhs-ceph-repo", d["rhs_repo"]]
+    reg, img, tag = parse_full_image(d.get("full_image") or "")
+    reg = reg or d.get("docker_registry") or ""
+    img = img or d.get("docker_image") or ""
+    tag = tag or d.get("docker_tag") or ""
+    if reg:
+        cmd += ["--docker-registry", reg]
+    if img:
+        cmd += ["--docker-image", img]
+    if tag:
+        cmd += ["--docker-tag", tag]
+    for line in (d.get("extra_custom_config") or "").strip().splitlines():
+        line = line.strip()
+        if line and "=" in line:
+            cmd += ["--custom-config", line]
+    if d.get("skip_subscription"):
+        cmd.append("--skip-subscription")
+    if d.get("mode") == "new":
+        cmd.append("--store")
+    elif reuse_file:
+        cmd += ["--reuse", reuse_file]
+    return cmd
+
+
+def build_command(d):
+    suite_path = d.get("suite") or ""
+    tests = d.get("tests") or []
+    if not suite_path:
+        raise ValueError("Suite file is required")
+    temp_suite = create_temp_suite(suite_path, tests)
+    root = full(d.get("root") or os.getcwd())
+    cmd = _build_command_args(d, temp_suite, root)
+    return cmd, root, temp_suite
+
+def _cmd_to_string(cmd):
+    """Format argv list as a single shell command string (quote args with spaces)."""
+    return " ".join(repr(a) if " " in a else a for a in cmd)
+
+
+@app.route('/preview', methods=['POST'])
+def preview():
+    global last_preview_temp
+    data = request.json or {}
+    suite_path = data.get("suite") or ""
+    tests = data.get("tests") or []
+    if not suite_path:
+        return jsonify({"error": "Suite file is required"})
+    try:
+        if last_preview_temp and os.path.isfile(last_preview_temp):
+            try:
+                os.remove(last_preview_temp)
+            except OSError:
+                pass
+        temp_suite = create_temp_suite(suite_path, tests)
+        last_preview_temp = temp_suite
+    except Exception as e:
+        return jsonify({"error": str(e)})
+    root = full(data.get("root") or os.getcwd())
+    cmd = _build_command_args(data, temp_suite, root)
+    return jsonify({"command": _cmd_to_string(cmd), "temp_suite_path": temp_suite})
+
+@app.route('/run', methods=['POST'])
+def run():
+    data = request.json or {}
+    try:
+        cmd, cwd, temp_suite_path = build_command(data)
+    except (KeyError, TypeError, ValueError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    threading.Thread(target=exec_cmd, args=(cmd, cwd, temp_suite_path)).start()
+    return jsonify({"ok": True})
+
+def exec_cmd(cmd, cwd=None, temp_suite_path=None):
+    global logs
+    logs.clear()
+    try:
+        p = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=cwd or os.getcwd(),
+        )
+        for line in p.stdout:
+            logs.append(line)
+        p.wait()
+    finally:
+        if temp_suite_path and os.path.isfile(temp_suite_path):
+            try:
+                os.remove(temp_suite_path)
+            except OSError:
+                pass
+
+@app.route('/logs')
+def get_logs():
+    return jsonify(logs)
+
+if __name__ == "__main__":
+    app.run(debug=True)

@@ -1,0 +1,311 @@
+service_type: host
+addr: 10.64.0.189
+hostname: tala003
+labels:
+  - mon
+  - mgr
+  - osd
+location:
+  root: default
+  datacenter: DC1
+---
+
+service_type: host
+addr: 10.64.0.190
+hostname: tala004
+labels:
+  - mon
+  - mgr
+  - osd
+location:
+  root: default
+  datacenter: DC1
+---
+
+service_type: host
+addr: 10.64.0.191
+hostname: tala005
+labels:
+  - mon
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC1
+---
+service_type: host
+addr: 10.64.0.192
+hostname: tala006
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC1
+---
+
+service_type: host
+addr: 10.64.0.193
+hostname: tala007
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC1
+---
+
+service_type: host
+addr: 10.64.0.194
+hostname: tala008
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC1
+---
+
+service_type: host
+addr: 10.64.0.195
+hostname: tala009
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC1
+---
+service_type: host
+addr: 10.64.0.196
+hostname: tala010
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC1
+---
+
+service_type: host
+addr: 10.64.0.197
+hostname: tala011
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC1
+---
+
+service_type: host
+addr: 10.64.0.198
+hostname: tala012
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC1
+---
+
+service_type: host
+addr: 10.64.0.199
+hostname: tala013
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC1
+---
+service_type: host
+addr: 10.64.0.200
+hostname: tala014
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC1
+---
+
+service_type: host
+addr: 10.64.0.201
+hostname: tala015
+labels:
+  - mon
+  - mgr
+  - osd
+location:
+  root: default
+  datacenter: DC2
+---
+
+service_type: host
+addr: 10.64.0.202
+hostname: tala016
+labels:
+  - mon
+  - mgr
+  - osd
+location:
+  root: default
+  datacenter: DC2
+---
+
+service_type: host
+addr: 10.64.0.203
+hostname: tala017
+labels:
+  - mon
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC2
+---
+
+service_type: host
+addr: 10.64.0.204
+hostname: tala018
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC2
+---
+service_type: host
+addr: 10.64.0.205
+hostname: tala019
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC2
+---
+
+service_type: host
+addr: 10.64.0.206
+hostname: tala020
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC2
+---
+
+service_type: host
+addr: 10.64.0.207
+hostname: tala021
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC2
+---
+
+service_type: host
+addr: 10.64.0.208
+hostname: tala022
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC2
+---
+
+service_type: host
+addr: 10.64.0.209
+hostname: tala023
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC2
+---
+
+service_type: host
+addr: 10.64.0.210
+hostname: tala024
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC2
+---
+
+service_type: host
+addr: 10.64.0.211
+hostname: tala025
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC2
+---
+
+service_type: host
+addr: 10.64.0.212
+hostname: tala026
+labels:
+  - osd
+  - nvme
+location:
+  root: default
+  datacenter: DC2
+---
+
+service_type: host
+addr: 10.64.0.188
+hostname: tala002
+labels:
+  - mon
+  - _admin
+  - installer
+  - mgr
+---
+service_type: mon
+service_name: mon
+placement:
+  label: mon
+spec:
+  crush_locations:
+    tala002 :
+    - datacenter=DC3
+    tala003 :
+    - datacenter=DC1
+    tala004 :
+    - datacenter=DC1
+    tala005 :
+    - datacenter=DC1
+    tala015 :
+    - datacenter=DC2
+    tala016 :
+    - datacenter=DC2
+    tala017 :
+    - datacenter=DC2
+
+---
+service_type: mgr
+service_name: mgr
+placement:
+  label: mgr
+---
+service_type: osd
+service_id: all-available-devices
+service_name: osd.all-available-devices
+spec:
+  data_devices:
+    all: true
+placement:
+  label: "osd"
+---
