@@ -1,7 +1,8 @@
 ##############################################################################################
 # Tier-Level: 1
 # Test-Suite: tier1-nfs-ganesha-upgrade-9x-to-9x-latest.yaml
-# Scenario: Upgrade Ceph 8.x(GA) cluster to Ceph 9(Latest) with NFS-Ganesha in RHEL9
+# Scenario: Upgrade Ceph 8.x(GA) cluster to Ceph 9(Latest)
+# with NFS-Ganesha in RHEL9
 #
 # Cluster Configuration: Conf: conf/squid/nfs/1admin-3client-7node.yaml
 #
@@ -13,13 +14,13 @@
 tests:
   - test:
       name: setup install pre-requisistes
-      desc: Setup phase to deploy the required pre-requisites for running the tests.
+      desc: Setup phase to deploy pre-requisites for running the tests.
       module: install_prereq.py
       abort-on-fail: true
 
   - test:
-      name: Bootstrap Ceph 9.0(GA) cluster and deploy services with label placements.
-      desc: Bootstrap Ceph 9.0(GA) cluster and deploy services with label placements.
+      name: Bootstrap Ceph 9.0(GA) cluster with label placements
+      desc: Bootstrap Ceph 9.0(GA) cluster with label placements
       polarion-id: CEPH-83573777
       module: test_cephadm.py
       config:
@@ -30,10 +31,10 @@ tests:
               service: cephadm
               args:
                 rhcs-version: 9.0
-                release: rc
+                release: released
                 mon-ip: node1
                 orphan-initial-daemons: true
-                skip-monitoring-stack: true
+                skip-monitoring-stack: false
           - config:
               command: add_hosts
               service: host
@@ -155,16 +156,37 @@ tests:
       abort-on-fail: true
 
   - test:
+      name: Enable logging to file
+      module: rados_prep.py
+      config:
+        log_to_file: true
+      desc: Change config options to enable logging to file
+
+  - test:
       name: Setup NFS-Ganesha cluster
       desc: Setup NFS-Ganesha cluster
       module: nfs_verify_multiple_parallel_io_and_lookups.py
       polarion-id: CEPH-83581304
       abort-on-fail: false
       config:
+        sudo: false
         nfs_version: 4.1
         clients: 4
         io: false
         cleanup: false
+
+  - test:
+      name: Nfs Ganesha metrics validation - pre_upgrade
+      module: test_nfs_ganesha_metrics_upgrade_validation.py
+      desc: Enable Enable_Metrics in ganesha.conf and validate monitoring port before upgrade
+      polarion-id: CEPH-83620035
+      abort-on-fail: true
+      config:
+        operation: before_upgrade
+        nfs_name: cephfs-nfs
+        monitoring_port: 9587
+        configure_metrics: true
+        ensure_monitoring_port: true
 
   - test:
       name: Nfs Verify multiple io and lookups
@@ -173,6 +195,7 @@ tests:
       polarion-id: CEPH-83581304
       abort-on-fail: false
       config:
+        sudo: true
         nfs_version: 4.1
         clients: 4
         setup: false
@@ -180,10 +203,11 @@ tests:
   - test:
       name: Nfsv4 multiple operations - pre_upgrade
       module: test_nfs_multiple_operations_for_upgrade.py
-      desc: nfs multiple operations before upgrade create, delete, write, read, rename
+      desc: NFS ops before upgrade - create, delete, write, read, rename
       polarion-id: CEPH-83620035
       abort-on-fail: false
       config:
+        sudo: false
         nfs_version: 4.2
         clients: 2
         setup: false
@@ -210,10 +234,11 @@ tests:
         - test:
             name: nfs operations during upgrade
             module: test_nfs_io_operations_during_upgrade.py
-            desc: nfs multiple operations during upgrade create, delete, write, read, rename
+            desc: NFS ops during upgrade - create, delete, write, read, rename
             polarion-id: CEPH-83620035
             abort-on-fail: false
             config:
+              sudo: false
               nfs_version: 4.2
               clients: 4
               setup: false
@@ -221,15 +246,33 @@ tests:
               dd_command_size_in_M: 10
               exports_number: 4
               loop_count: 4
+              io_health_monitor: true
+              stall_threshold_s: 5
+              stall_recovery_timeout_s: 100
+              probe_interval_s: 1
       abort-on-fail: true
+
+  - test:
+      name: Nfs Ganesha metrics validation - post_upgrade
+      module: test_nfs_ganesha_metrics_upgrade_validation.py
+      desc: Verify Enable_Metrics in ganesha.conf and monitoring port after upgrade
+      polarion-id: CEPH-83620035
+      abort-on-fail: true
+      config:
+        operation: after_upgrade
+        nfs_name: cephfs-nfs
+        monitoring_port: 9587
+        configure_metrics: false
+        ensure_monitoring_port: false
 
   - test:
       name: NFSv4 multiple operations - post_upgrade
       module: test_nfs_multiple_operations_for_upgrade.py
-      desc: nfs multiple operations after upgrade create, delete, write, read, rename
+      desc: NFS ops after upgrade - create, delete, write, read, rename
       polarion-id: CEPH-83620035
       abort-on-fail: false
       config:
+        sudo: false
         nfs_version: 4.2
         clients: 2
         setup: false
@@ -244,6 +287,7 @@ tests:
       polarion-id: CEPH-83577591
       abort-on-fail: false
       config:
+        sudo: false
         nfs_version: 4.1
         clients: 4
 
@@ -254,6 +298,7 @@ tests:
       polarion-id: CEPH-83575941
       abort-on-fail: false
       config:
+        sudo: true
         nfs_version: 4.1
         clients: 3
         operation: verify_permission
@@ -265,6 +310,7 @@ tests:
       polarion-id: CEPH-83575941
       abort-on-fail: false
       config:
+        sudo: true
         nfs_version: 3
         clients: 3
         operation: verify_permission
@@ -276,6 +322,7 @@ tests:
       polarion-id: CEPH-83575927
       abort-on-fail: false
       config:
+        sudo: true
         nfs_version: 3
         clients: 3
         operation: verify_non_existing_file
@@ -283,10 +330,11 @@ tests:
   - test:
       name: Nfs verify export unexport while nfs share is in use
       module: nfs_verify_stress.py
-      desc: Stress by performing admin ops like exports unexports while clients are actively using the NFS shares.
+      desc: Stress admin ops (export/unexport) while clients use NFS shares
       polarion-id: CEPH-83575994
       abort-on-fail: false
       config:
+        sudo: false
         nfs_version: 4.1
         clients: 3
 
@@ -297,7 +345,8 @@ tests:
       polarion-id: CEPH-83577595
       abort-on-fail: true
       config:
+        sudo: false
         nfs_version: 4.1
         clients: 3
-        num_files: 1000
-        num_dirs: 1000
+        num_files: 10
+        num_dirs: 10

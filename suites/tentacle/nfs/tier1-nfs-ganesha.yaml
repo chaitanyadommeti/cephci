@@ -134,6 +134,17 @@ tests:
       name: configure client
 
   - test:
+      name: NFS CephX cluster rotate-key
+      module: test_nfs_cephx_key_rotation.py
+      desc: NFS export stays mounted post nfs cluster key rotate
+      polarion-id: CEPH-83632951
+      abort-on-fail: false
+      config:
+        nfs_version: 4.1
+        clients: 1
+        nfs_name: cephfs-nfs-cephx
+
+  - test:
       name: Nfs Verify symbolic links inherit appropriate permissions and not allow unauthorized access
       module: nfs_verify_symbolic_links_permissions.py
       desc: Verify symbolic links inherit appropriate permissions and not allow unauthorized access
@@ -412,65 +423,10 @@ tests:
           client02 : setuid_bit
           client03 : perform_lookups
 
-  - test:
-      name: NFS LDAP User Mapping Test
-      desc: Verify NFS-Ganesha correctly resolves LDAP users and maps UID/GID
-      module: security.test_nfs_ldap_mapping.py
-      polarion-id: CEPH-83575001
-      abort-on-fail: false
-      config:
-        nfs_version: 4.2
-        test_case: verify_mapping
-
-  - test:
-      name: NFS LDAP Group Permissions Test
-      desc: Validate enforcement of file permissions using LDAP group membership
-      module: security.test_nfs_ldap_mapping.py
-      polarion-id: CEPH-83575002
-      abort-on-fail: false
-      config:
-        nfs_version: 4.2
-        test_case: verify_group_permissions
-
-  - test:
-      name: NFS LDAP User Attribute Change Test
-      desc: Validate NFS behavior when LDAP user attributes change or users are removed
-      module: security.test_nfs_ldap_mapping.py
-      polarion-id: CEPH-83575003
-      abort-on-fail: false
-      config:
-        nfs_version: 4.2
-        test_case: verify_user_change
-
-  - test:
-      name: NFS LDAP Outage Test
-      desc: Validate NFS behavior during LDAP server outage
-      module: security.test_nfs_ldap_mapping.py
-      polarion-id: CEPH-83575004
-      abort-on-fail: false
-      config:
-        nfs_version: 4.2
-        test_case: verify_ldap_outage
-
-  - test:
-      name: NFS LDAP Performance Test
-      desc: Validate LDAP identity resolution performance under concurrent NFS load
-      module: security.test_nfs_ldap_mapping.py
-      polarion-id: CEPH-83575005
-      abort-on-fail: false
-      config:
-        nfs_version: 4.2
-        test_case: verify_performance
-
-  - test:
-      name: NFS LDAP NFSv3 Access Test
-      desc: Verify LDAP user mapping works correctly over NFSv3
-      module: security.test_nfs_ldap_mapping.py
-      polarion-id: CEPH-83632304
-      abort-on-fail: false
-      config:
-        nfs_version: 3
-        test_case: verify_mapping
+  # LDAP tests moved to suites/tentacle/nfs/tier0-nfs-ganesha-authentication.yaml
+  # (combined LDAP + Kerberos auth suite). Polarion IDs preserved there:
+  # CEPH-83575000 (bootstrap), CEPH-83575001, CEPH-83575002, CEPH-83575003,
+  # CEPH-83575004, CEPH-83575005, CEPH-83632304.
 
   - test:
       name: TLS deploy, mount verify, and basic IO
@@ -484,9 +440,11 @@ tests:
         clients: 1
         nfs_cluster_name: cephfs-nfs-tls
         operation: tls_deploy_mount_verify
+        # Happy-path kTLS mount logs "TLS connection established"; AUTH_TLS is
+        # probe/STARTTLS path only and is not present on a successful mount.
         tls_log_substrings:
-          - AUTH_TLS
-          - TLS
+          - TLS connection established
+          - "[TLS]"
         strict_tls_log_check: true
 
   - test:
@@ -515,3 +473,58 @@ tests:
         nfs_cluster_name: cephfs-nfs-tls
         operation: tls_logs_openssl_probe
         redeploy_cluster_min_tls12: false
+
+  - test:
+      name: TLS negative invalid certificate scenarios
+      module: security.test_tls_feature.py
+      desc: >
+        Valid TLS mount and IO, then negative tests: corrupted Ganesha server certs
+        (mount must fail; capture mount error and systemctl status tlshd) and
+        corrupted client trust anchor (mount must fail; capture tlshd status).
+      abort-on-fail: false
+      polarion-id: CEPH-83629233
+      config:
+        nfs_version: 4.2
+        clients: 1
+        nfs_cluster_name: cephfs-nfs-tls
+        operation: tls_negative_invalid_certs
+        negative_cert_scenario: both
+        timeout: 1800
+
+  - test:
+      name: TLS mount fio IO with tcpdump encryption verification
+      module: security.test_tls_feature.py
+      desc: >
+        Phase 1: plain NFS cluster/export, fio write/read, tcpdump- fio buffer
+        pattern must appear in cleartext on the wire. Phase 2: TLS cluster/export,
+        same fio pattern must not appear; TLS wire traffic verified encrypted.
+      abort-on-fail: false
+      polarion-id: CEPH-83629170
+      config:
+        nfs_version: 4.2
+        clients: 1
+        nfs_cluster_name: cephfs-nfs-tls
+        plain_nfs_cluster_name: cephfs-nfs-plain
+        operation: tls_io_tcpdump_encryption
+        fio_size: 100M
+        fio_bs: 4k
+        fio_runtime: 300
+        timeout: 7200
+
+  - test:
+      name: TLS stunnel client IO with tcpdump encryption verification
+      module: security.test_tls_feature.py
+      desc: >
+        Deploy TLS Ganesha, configure stunnel on client (no kTLS/tlshd), mount via
+        127.0.0.1:49152 proxy, run fio I/O under tcpdump, verify wire traffic is encrypted.
+      abort-on-fail: false
+      config:
+        nfs_version: 4.2
+        clients: 1
+        nfs_cluster_name: cephfs-nfs-tls
+        operation: tls_stunnel_io_tcpdump_encryption
+        stunnel_accept_port: 49152
+        fio_size: 100M
+        fio_bs: 4k
+        fio_runtime: 300
+        timeout: 7200

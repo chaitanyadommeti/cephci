@@ -3,6 +3,7 @@ NVMe Service, Gateway Group, and Gateway classes for NVMeoF workflows.
 """
 
 import json
+import time
 
 from looseversion import LooseVersion
 
@@ -49,9 +50,17 @@ class NVMeService:
             gw_nodes = [gw_nodes]
 
         self.gw_nodes = get_nodes_by_ids(self.ceph_cluster, gw_nodes)
-        self.is_spec_or_mtls = self.mtls or self.config.get("spec_deployment", False)
+        # nvmeof_spec / cnc_spec require orch apply_spec so custom keys reach the service YAML
+        self.is_spec_or_mtls = (
+            self.mtls
+            or self.config.get("spec_deployment", False)
+            or bool(self.config.get("nvmeof_spec"))
+            or bool(self.config.get("cnc_spec"))
+        )
         if self.inband_auth_mode:
             self.is_spec_or_mtls = True
+        self.service_name = None
+        self.service_id = None
 
     def _get_ceph_version(self):
         return get_ceph_version_from_cluster(self.clients[0])
@@ -111,9 +120,16 @@ class NVMeService:
         if LooseVersion(self.ceph_version) >= LooseVersion("20.2.1"):
             spec["spec"].pop("pool")
 
-        # Add encryption if specified
+        # Add encryption if specified (TLS pre-shared key generated on installer)
         if self.inband_auth_mode:
             spec["encryption"] = True
+
+        # Add support for enable_encryption and encryption_key_path params
+        # Refer https://ibm-ceph.atlassian.net/browse/IBMCEPH-16168
+        if self.config.get("enable_encryption", False):
+            spec["enable_encryption"] = True
+        if self.config.get("encryption_key_path", False):
+            spec["encryption_key_path"] = True
 
         # Add group if specified
         if self.group:
@@ -133,15 +149,15 @@ class NVMeService:
             }
             # Handle version-specific logic
             if release <= "7.1":
+                self._merge_nvmeof_spec_keys(cfg["config"]["specs"][0]["spec"])
                 return cfg
             elif release >= "8":
                 if not self.group:
                     raise ValueError("Gateway group not provided for RHCS 8+")
 
                 if self.is_spec_or_mtls:
-                    cfg["config"]["specs"][0][
-                        "service_id"
-                    ] = f"{self.nvme_metadata_pool}.{self.group}"
+                    pool_id = self.nvme_metadata_pool.lstrip(".")
+                    cfg["config"]["specs"][0]["service_id"] = f"{pool_id}.{self.group}"
                     cfg["config"]["specs"][0]["spec"]["group"] = self.group
                 else:
                     if LooseVersion(self.ceph_version) >= LooseVersion("20.2.1"):
@@ -156,6 +172,7 @@ class NVMeService:
                         "rebalance_period_sec"
                     ] = rebalance_sec
 
+                self._merge_nvmeof_spec_keys(cfg["config"]["specs"][0]["spec"])
                 return cfg
         else:
             pos_args = [self.nvme_metadata_pool]
@@ -183,6 +200,55 @@ class NVMeService:
 
         return cfg
 
+    def _merge_nvmeof_spec_keys(self, spec_dict):
+        """Merge suite ``nvmeof_spec`` / ``cnc_spec`` into the orch service spec.
+
+        Product keys such as ``cnc_enable``, ``cnc_rate_limiter_bytes``,
+        ``cnc_chunk_blocks``, and ``cnc_parallel_chunks`` are passed through
+        unchanged so Jinja renders them into the cephadm YAML.
+        """
+        extras = {}
+        for key in ("nvmeof_spec", "cnc_spec"):
+            value = self.config.get(key)
+            if isinstance(value, dict):
+                extras.update(value)
+        if extras:
+            LOG.info(f"Merging custom nvmeof orch spec keys: {extras}")
+            spec_dict.update(extras)
+
+    def apply_nvmeof_spec(self, nvmeof_spec=None, redeploy=True, wait_sec=60):
+        """Apply (or re-apply) the NVMe-oF orch service spec.
+
+        Args:
+            nvmeof_spec: Optional dict merged into config nvmeof_spec before apply
+            redeploy: Whether to ``ceph orch redeploy`` after apply
+            wait_sec: Sleep after redeploy for daemons to come up
+        """
+        if nvmeof_spec:
+            merged = dict(self.config.get("nvmeof_spec") or {})
+            merged.update(nvmeof_spec)
+            self.config["nvmeof_spec"] = merged
+        self.is_spec_or_mtls = True
+        deploy_config = self._create_spec_deployment_config()
+        if not deploy_config:
+            raise RuntimeError("Failed to build nvmeof apply_spec config")
+        LOG.info(f"Applying nvmeof orch spec: {deploy_config}")
+        test_nvmeof.run(self.ceph_cluster, **deploy_config)
+        # Refresh service_name / service_id after apply
+        ceph = Orch(self.ceph_cluster, **{})
+        out, _ = ceph.shell(args=["ceph orch ls nvmeof --format json"])
+        services = json.loads(out)
+        for service in services:
+            if "nvmeof" not in service["service_name"]:
+                continue
+            if self.group and self.group not in service["service_name"]:
+                continue
+            self.service_name = service["service_name"]
+            self.service_id = service["service_id"]
+            break
+        if redeploy:
+            self.redeploy(wait_sec=wait_sec)
+
     def _get_placement_config(self, config, gw_nodes):
         """Get placement configuration based on config options."""
         placement = {"nodes": [i.hostname for i in gw_nodes]}
@@ -201,6 +267,30 @@ class NVMeService:
 
         return placement
 
+    def _discover_service_name(self):
+        """Discover NVMeoF orchestrator service name/id when not deployed by this test."""
+        if self.service_name:
+            return
+
+        ceph = Orch(self.ceph_cluster, **{})
+        cmd = "ceph orch ls nvmeof --format json"
+        out, _ = ceph.shell(args=[cmd])
+        services = json.loads(out)
+        for service in services:
+            if "nvmeof" not in service["service_name"]:
+                continue
+            if self.group:
+                if not service["service_name"].endswith(f".{self.group}"):
+                    continue
+            self.service_name = service["service_name"]
+            self.service_id = service["service_id"]
+            LOG.info(
+                "Discovered NVMeoF service name: %s, service id: %s",
+                self.service_name,
+                self.service_id,
+            )
+            return
+
     def deploy(self):
         """
         Deploy NVMe gateways using orchestrator, then fetch and update daemon and service names for each gateway node.
@@ -215,54 +305,98 @@ class NVMeService:
         if deploy_config:
             test_nvmeof.run(self.ceph_cluster, **deploy_config)
 
-        # Once the service is deployed, get the service name and service id and store it
-        ceph = Orch(self.ceph_cluster, **{})
-        cmd = "ceph orch ls nvmeof --format json"
-        out, _ = ceph.shell(args=[cmd])
-        services = json.loads(out)
-        self.service_name = None
-        self.service_id = None
-        for service in services:
-            # If we have multiple services in single cluster then we need to filter the service by group
-            # so that we will get the correct service name and service id for the group.
-            # when we take services[0]["service_name"] only first service name will be returned
-            # so we need to filter the service by group.
-            if "nvmeof" in service["service_name"]:
-                if self.group:
-                    if self.group in service["service_name"]:
-                        service_name = service["service_name"]
-                        service_id = service["service_id"]
-                        LOG.info(
-                            f"Service name: {service_name}, Service id: {service_id}"
-                        )
-                        self.service_name = service_name
-                        self.service_id = service_id
-                        break
-                else:
-                    service_name = service["service_name"]
-                    service_id = service["service_id"]
-                    LOG.info(f"Service name: {service_name}, Service id: {service_id}")
-                    self.service_name = service_name
-                    self.service_id = service_id
-                    break
+        self._discover_service_name()
 
-    def init_gateways(self):
+    def redeploy(self, wait_sec=30):
+        """Redeploy the NVMe-oF orchestrator service after spec apply."""
+        if not self.service_name:
+            raise RuntimeError("NVMe-oF service name not set; deploy the service first")
+        orch = Orch(self.ceph_cluster, **{})
+        cmd = f"ceph orch redeploy {self.service_name}"
+        LOG.info("Redeploying NVMe-oF service: %s", cmd)
+        orch.shell(args=[cmd])
+        if wait_sec:
+            time.sleep(wait_sec)
+
+    def wait_for_gateways_ready(self, timeout=300, interval=10):
+        """Poll each gateway until gateway_initialization_over is True.
+
+        Must be called after init_gateways() so that self.gateways is populated.
+
+        Args:
+            timeout (int): Maximum seconds to wait per gateway (default 300).
+            interval (int): Poll interval in seconds (default 10).
+
+        Raises:
+            RuntimeError: If any gateway does not become ready within timeout.
+        """
+        if not getattr(self, "gateways", None):
+            raise RuntimeError("Gateways not initialised; call init_gateways() first")
+
+        for gw in self.gateways:
+            hostname = gw.node.hostname
+            deadline = time.time() + timeout
+            LOG.info(
+                "Waiting for gateway %s to be ready (timeout=%ds)", hostname, timeout
+            )
+            while time.time() < deadline:
+                try:
+                    out, _ = gw.gateway.info(**{"base_cmd_args": {"format": "json"}})
+                    info = json.loads(out)
+                    if info.get("gateway_initialization_over"):
+                        LOG.info("Gateway %s is ready", hostname)
+                        break
+                except Exception as exc:
+                    LOG.debug("gateway info on %s raised %s — retrying", hostname, exc)
+                time.sleep(interval)
+            else:
+                raise RuntimeError(
+                    f"Gateway {hostname} did not become ready within {timeout}s"
+                )
+
+    def init_gateways(self, timeout=300, interval=10):
         """
         Initialize NVMeGateway objects for each ceph_node in the group.
+
+        Retries create_gateway() until the gateway responds (handles the window
+        where the daemon is still starting after a redeploy).
+
+        Args:
+            timeout (int): Max seconds to wait per node (default 300).
+            interval (int): Retry interval in seconds (default 10).
         """
         self.gateways = []
         port = getattr(self, "port", DEFAULT_PORT)
-
         ceph = Orch(self.ceph_cluster, **{})
+        version = nvme_gw_cli_version_adapter(self.ceph_cluster)
 
         for node in self.gw_nodes:
-            self.gateways.append(
-                create_gateway(
-                    nvme_gw_cli_version_adapter(self.ceph_cluster),
-                    node,
-                    mtls=self.mtls,
-                    shell=getattr(ceph, "shell"),
-                    port=port,
-                    gw_group=self.group,
-                )
-            )
+            deadline = time.time() + timeout
+            LOG.info("Initialising gateway %s (timeout=%ds)", node.hostname, timeout)
+            while True:
+                try:
+                    gw = create_gateway(
+                        version,
+                        node,
+                        mtls=self.mtls,
+                        shell=getattr(ceph, "shell"),
+                        port=port,
+                        gw_group=self.group,
+                    )
+                    self.gateways.append(gw)
+                    LOG.info("Gateway %s initialised", node.hostname)
+                    break
+                except Exception as exc:
+                    if time.time() >= deadline:
+                        raise RuntimeError(
+                            f"Gateway {node.hostname} did not become reachable "
+                            f"within {timeout}s"
+                        ) from exc
+                    LOG.debug(
+                        "Gateway %s not ready yet (%s) — retrying in %ds",
+                        node.hostname,
+                        exc,
+                        interval,
+                    )
+                    time.sleep(interval)
+        self._discover_service_name()

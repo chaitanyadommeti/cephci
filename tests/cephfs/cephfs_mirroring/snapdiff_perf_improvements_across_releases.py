@@ -1,10 +1,22 @@
 import concurrent.futures
 import os
+import re
+import signal
 import time
 import traceback
 
 from tests.cephfs.cephfs_mirroring.cephfs_mirroring_utils import CephfsMirroringUtils
+from tests.cephfs.lib.cephfs_common_lib import CephFSCommonUtils
 from utility.log import Log
+
+
+class TestTimeout(Exception):
+    pass
+
+
+def _timeout_handler(signum, frame):
+    raise TestTimeout("Test exceeded maximum allowed runtime of 3 hours")
+
 
 log = Log(__name__)
 
@@ -18,17 +30,37 @@ def run(ceph_cluster, **kw):
     """
     CEPH-83595260 - Performance evaluation of snapdiff feature using CephFS Mirroring after upgrading to RHCS 8.0
     """
+    max_runtime = 3 * 3600
+    signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.alarm(max_runtime)
+    config = kw.get("config") or {}
+    ceph_cluster_dict = kw.get("ceph_cluster_dict")
+    test_data = kw.get("test_data")
+    source_clients = None
+    target_clients = None
+    fs_util_ceph1 = None
+    source_fs = None
+    target_fs = None
+    nfs_name = None
+    nfs_server = None
+    nfs_server_node = None
+    target_user = None
+    subvol_group_name = None
+    subvolume_names = None
+    mount_paths = None
+    export_binding = None
+    io_dir_paths = {}
+    subvol_paths_without_uuid = None
+    peer_uuid = None
+    fs_mirroring_utils = CephfsMirroringUtils(
+        ceph_cluster_dict.get("ceph1"), ceph_cluster_dict.get("ceph2")
+    )
     try:
-        config = kw.get("config")
-        ceph_cluster_dict = kw.get("ceph_cluster_dict")
-        test_data = kw.get("test_data")
-        fs_mirroring_utils = CephfsMirroringUtils(
-            ceph_cluster_dict.get("ceph1"), ceph_cluster_dict.get("ceph2")
-        )
+        nfs_servers = ceph_cluster_dict.get("ceph1").get_ceph_objects("nfs")
         env = fs_mirroring_utils.prepare_env_snapdiff(
             config, ceph_cluster_dict, test_data
         )
-        if not env:
+        if not isinstance(env, dict):
             log.error("Failed to prepare environment for snapdiff testing.")
             return 1
 
@@ -41,7 +73,10 @@ def run(ceph_cluster, **kw):
         cephfs_mirror_node = env["cephfs_mirror_node"]
         nfs_server = env["nfs_server"]
         nfs_name = env["nfs_name"]
-
+        nfs_server_node = None
+        for nfs_server_iter in nfs_servers:
+            if nfs_server in nfs_server_iter.node.hostname:
+                nfs_server_node = nfs_server_iter
         target_user = "mirror_remote_user_snap_diff_1"
         target_site = "remote_site_snap_diff_1"
 
@@ -80,17 +115,63 @@ def run(ceph_cluster, **kw):
                 group_name=subvol_group_name,
             )
 
-        mount_paths, subvol_paths, export_binding = (
-            fs_mirroring_utils.mount_subvolumes_snapdiff(
-                source_client=source_clients[0],
-                fs_util_ceph1=fs_util_ceph1,
-                default_fs=source_fs,
-                subvolume_names=subvolume_names,
-                subvol_group_name=subvol_group_name,
-                nfs_server=nfs_server,
-                nfs_name=nfs_name,
+        def get_ganesha_pid(nfs_server_node):
+            try:
+                netstat_out, _ = nfs_server_node.exec_command(
+                    sudo=True, cmd="netstat -anp | grep ganesha"
+                )
+                log.info(f"NFS netstat: {netstat_out}")
+                pid_out, _ = nfs_server_node.exec_command(
+                    sudo=True, cmd="pgrep ganesha"
+                )
+                log.info(f"NFS pgrep: {pid_out}")
+                pid = pid_out.strip()
+                # if pid is null, return None
+                if not pid:
+                    return None
+                log.info(
+                    f"ganesha process PID for {nfs_server_node.node.hostname}: {pid}"
+                )
+                return pid
+            except Exception as e:
+                log.error(f"Error getting ganesha process PID: {e}")
+                return None
+
+        ganesha_pid = get_ganesha_pid(nfs_server_node)
+        if not ganesha_pid:
+            log.error("Failed to get ganesha process PID; NFS is not running")
+            return 1
+        try:
+            mount_paths, subvol_paths, export_binding = (
+                fs_mirroring_utils.mount_subvolumes_snapdiff(
+                    source_client=source_clients[0],
+                    fs_util_ceph1=fs_util_ceph1,
+                    default_fs=source_fs,
+                    subvolume_names=subvolume_names,
+                    subvol_group_name=subvol_group_name,
+                    nfs_server=nfs_server,
+                    nfs_name=nfs_name,
+                )
             )
-        )
+        except Exception as e:
+            log.error(f"Error mounting subvolumes: {e}")
+            if re.search(r"mount\.nfs:[\s\S]*Connection refused", str(e)):
+                nfs_nodes = ceph_cluster_dict.get("ceph1").get_ceph_objects("nfs")
+                cephfs_common_utils = CephFSCommonUtils(ceph_cluster)
+                try:
+                    cephfs_common_utils.nfs_debug_logs(
+                        source_clients[0],
+                        nfs_name,
+                        log_dir,
+                        nfs_nodes,
+                        dump_output=True,
+                    )
+                except Exception as log_ex:
+                    log.error("Failed to collect NFS container debug logs: %s", log_ex)
+                ganesha_pid = get_ganesha_pid(nfs_server_node)
+                if not ganesha_pid:
+                    log.error("Failed to get ganesha process PID")
+            raise Exception("Mount operation failed")
         log.info(f"Mount Paths : {mount_paths}")
         log.info(f"Sub Volume Paths : {subvol_paths}")
 
@@ -128,7 +209,7 @@ def run(ceph_cluster, **kw):
         fsid = fs_util_ceph1.get_fsid(source_clients[0])
         daemon_name = fs_mirroring_utils.get_daemon_name(source_clients[0])
         asok_file = fs_mirroring_utils.get_asok_file(
-            cephfs_mirror_node[0], fsid, daemon_name
+            cephfs_mirror_node, fsid, daemon_name
         )
         filesystem_id = fs_mirroring_utils.get_filesystem_id_by_name(
             source_clients[0], source_fs
@@ -207,7 +288,7 @@ def run(ceph_cluster, **kw):
             # Validate snapshot sync
             sync_info = fs_mirroring_utils.validate_snapshot_sync(
                 fs_mirroring_utils,
-                cephfs_mirror_node[0],
+                cephfs_mirror_node,
                 source_fs,
                 snapshot_name,
                 fsid,
@@ -357,101 +438,124 @@ def run(ceph_cluster, **kw):
         )
 
         return 0
+    except TestTimeout as e:
+        log.error(f"Test timed out after {max_runtime}s: {e}")
+        return 1
     except Exception as e:
         log.error(e)
         log.error(traceback.format_exc())
         return 1
     finally:
-        if config.get("cleanup", True):
-            log.info("Delete the snapshots")
-            snap_suffixes = [
-                "initial",
-                "w1",
-                "w2",
-                "w3",
-                "w4",
-                "r1",
-                "r2",
-                "r3",
-                "r4",
-                "rm1",
-                "rm2",
-                "rm3",
-                "rm4",
-            ]
-            client_types = {
-                "kernel": "Kernel",
-                "fuse": "Fuse",
-                "nfs": "NFS",
-            }
-            for snap_suffix in snap_suffixes:
-                for ctype in client_types:
-                    snapshot_name = f"snap_{ctype[0]}_{snap_suffix}"
-                    subvol_name = subvol_paths_without_uuid[ctype].rstrip("/")
+        signal.alarm(0)
+        if (
+            config.get("cleanup", True)
+            and source_clients
+            and fs_util_ceph1
+            and source_fs
+        ):
+            if subvol_paths_without_uuid:
+                log.info("Delete the snapshots")
+                snap_suffixes = [
+                    "initial",
+                    "w1",
+                    "w2",
+                    "w3",
+                    "w4",
+                    "r1",
+                    "r2",
+                    "r3",
+                    "r4",
+                    "rm1",
+                    "rm2",
+                    "rm3",
+                    "rm4",
+                ]
+                client_types = {
+                    "kernel": "Kernel",
+                    "fuse": "Fuse",
+                    "nfs": "NFS",
+                }
+                for snap_suffix in snap_suffixes:
+                    for ctype in client_types:
+                        snapshot_name = f"snap_{ctype[0]}_{snap_suffix}"
+                        subvol_name = subvol_paths_without_uuid[ctype].rstrip("/")
+                        fs_util_ceph1.remove_snapshot(
+                            client=source_clients[0],
+                            vol_name=source_fs,
+                            subvol_name=subvol_name,
+                            snap_name=snapshot_name,
+                            validate=True,
+                            group_name=subvol_group_name,
+                            force=True,
+                        )
+                        log.info(
+                            f"Successfully removed snapshot: {snapshot_name} for {ctype}"
+                        )
 
-                    fs_util_ceph1.remove_snapshot(
-                        client=source_clients[0],
-                        vol_name=source_fs,
-                        subvol_name=subvol_name,
-                        snap_name=snapshot_name,
-                        validate=True,
-                        group_name=subvol_group_name,
-                        force=True,
+                log.info("Remove paths used for mirroring")
+                for mount_type in ["kernel", "fuse", "nfs"]:
+                    subvol_path_without_uuid = subvol_paths_without_uuid[mount_type]
+                    fs_mirroring_utils.remove_path_from_mirroring(
+                        source_clients[0],
+                        source_fs,
+                        f"/volumes/{subvol_group_name}/{subvol_path_without_uuid}",
                     )
-                    log.info(
-                        f"Successfully removed snapshot: {snapshot_name} for {ctype}"
-                    )
 
-            log.info("Unmount the paths")
-            paths_to_unmount = [
-                mount_paths["kernel"],
-                mount_paths["fuse"],
-                mount_paths["nfs"],
-            ]
-            for path in paths_to_unmount:
-                source_clients[0].exec_command(sudo=True, cmd=f"umount -l {path}")
-
-            log.info("Remove paths used for mirroring")
-            for mount_type in ["kernel", "fuse", "nfs"]:
-                subvol_path_without_uuid = subvol_paths_without_uuid[mount_type]
-                fs_mirroring_utils.remove_path_from_mirroring(
-                    source_clients[0],
-                    source_fs,
-                    f"/volumes/{subvol_group_name}/{subvol_path_without_uuid}",
-                )
+            if mount_paths:
+                log.info("Unmount the paths")
+                paths_to_unmount = [
+                    mount_paths["kernel"],
+                    mount_paths["fuse"],
+                    mount_paths["nfs"],
+                ]
+                for path in paths_to_unmount:
+                    source_clients[0].exec_command(sudo=True, cmd=f"umount -l {path}")
 
             if export_binding:
                 fs_util_ceph1.remove_nfs_export(
                     source_clients[0], nfs_name, export_binding, validate=True
                 )
 
-            fs_util_ceph1.remove_nfs_cluster(source_clients[0], nfs_name, validate=True)
+            if nfs_name:
+                fs_util_ceph1.remove_nfs_cluster(
+                    source_clients[0], nfs_name, validate=True
+                )
+                if nfs_server_node:
+                    try:
+                        fsid = fs_util_ceph1.get_fsid(source_clients[0])
+                        out, _ = nfs_server_node.exec_command(
+                            sudo=True, cmd=f"ls -l /var/lib/ceph/{fsid}/nfs*/"
+                        )
+                        log.error(f"nfs files: {out}")
+                    except Exception as e:
+                        log.info(f"nfs files doesn't exist in nfs node: {e}")
 
-            log.info("Destroy CephFS Mirroring setup.")
-            fs_mirroring_utils.destroy_cephfs_mirroring(
-                source_fs,
-                source_clients[0],
-                target_fs,
-                target_clients[0],
-                target_user,
-                peer_uuid,
-            )
-
-            log.info("Remove Subvolumes")
-            for subvol in subvolume_names:
-                fs_util_ceph1.remove_subvolume(
+            if peer_uuid:
+                log.info("Destroy CephFS Mirroring setup.")
+                fs_mirroring_utils.destroy_cephfs_mirroring(
+                    source_fs,
                     source_clients[0],
-                    vol_name=source_fs,
-                    subvol_name=subvol,
-                    group_name=subvol_group_name,
+                    target_fs,
+                    target_clients[0],
+                    target_user,
+                    peer_uuid,
                 )
 
-            log.info("Remove Subvolume Group")
-            fs_util_ceph1.remove_subvolumegroup(
-                source_clients[0],
-                vol_name=source_fs,
-                group_name=subvol_group_name,
-            )
+            if subvolume_names and subvol_group_name:
+                log.info("Remove Subvolumes")
+                for subvol in subvolume_names:
+                    fs_util_ceph1.remove_subvolume(
+                        source_clients[0],
+                        vol_name=source_fs,
+                        subvol_name=subvol,
+                        group_name=subvol_group_name,
+                    )
+                log.info("Remove Subvolume Group")
+                fs_util_ceph1.remove_subvolumegroup(
+                    source_clients[0],
+                    vol_name=source_fs,
+                    group_name=subvol_group_name,
+                )
 
             log.info("Delete the mounted paths")
             for mount_type in ["kernel", "fuse", "nfs"]:
@@ -460,4 +564,5 @@ def run(ceph_cluster, **kw):
                     source_clients[0].exec_command(sudo=True, cmd=f"rm -rf {path}")
 
             fs_util_ceph1.remove_fs(source_clients[0], source_fs, validate=False)
-            fs_util_ceph1.remove_fs(target_clients[0], target_fs, validate=False)
+            if target_clients and target_fs:
+                fs_util_ceph1.remove_fs(target_clients[0], target_fs, validate=False)

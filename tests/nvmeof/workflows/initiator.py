@@ -1,4 +1,5 @@
 import json
+from time import sleep
 
 from ceph.ceph import CommandFailed
 from ceph.nvmeof.initiators.linux import Initiator
@@ -108,6 +109,7 @@ class NVMeInitiator(Initiator):
                         f"host_key={'set' if self.host_key else 'missing'}, "
                         f"subsys_key={'set' if self.subsys_key else 'missing'}"
                     )
+                # In nvme-cli connect-all doesn't accept dhchap-ctrl-secret for now
                 cmd_args.update(
                     {
                         "dhchap-secret": self.host_key,
@@ -127,30 +129,36 @@ class NVMeInitiator(Initiator):
             return
 
         # Connect to individual targets of a subsystem
+        listener_port = config.get("listener_port")
+        subsystems = config.get("subsystems")
         subsystem = config["nqn"]
+        if subsystem == "discover-all":
+            if not subsystems:
+                raise Exception("subsystems must be provided when nqn is discover-all")
+            allowed_subsystems = set(subsystems)
+        else:
+            allowed_subsystems = {subsystem}
         sub_endpoints = []
         discovered_records = json.loads(nqns_discovered)["records"]
 
         # Log what was discovered for debugging
-        LOG.debug(
-            f"Looking for subsystem: {subsystem}, listener_port: {config.get('listener_port')}"
-        )
+        LOG.debug(f"Looking for subsystem: {subsystem}, listener_port: {listener_port}")
         LOG.debug(f"Discovered records: {discovered_records}")
 
         # First, try to find exact match (both subnqn and trsvcid match)
         for nqn in discovered_records:
-            if nqn["subnqn"] == subsystem and nqn["trsvcid"] == str(
-                config["listener_port"]
+            if nqn["subnqn"] in allowed_subsystems and (
+                listener_port is None or nqn["trsvcid"] == str(listener_port)
             ):
                 sub_endpoints.append(nqn)
 
         # If no exact match, try matching by subnqn only (in case port differs)
         if not sub_endpoints:
             for nqn in discovered_records:
-                if nqn["subnqn"] == subsystem:
+                if nqn["subnqn"] in allowed_subsystems:
                     LOG.warning(
-                        f"Found subsystem {subsystem} but with different port "
-                        f"(discovered: {nqn['trsvcid']}, expected: {config.get('listener_port')}). "
+                        f"Found subsystem {nqn['subnqn']} but with different port "
+                        f"(discovered: {nqn['trsvcid']}, expected: {listener_port}). "
                         f"Using discovered port."
                     )
                     sub_endpoints.append(nqn)
@@ -167,10 +175,6 @@ class NVMeInitiator(Initiator):
             )
 
         for sub_endpoint in sub_endpoints:
-            conn_port = {"trsvcid": config["listener_port"]}
-            sub_args = {"nqn": sub_endpoint["subnqn"]}
-            cmd_args.update({"traddr": sub_endpoint["traddr"]})
-
             # Fallback: If auth is required but not configured, try to find auth from another
             # initiator on the same node (safety net in case prepare_io_execution didn't handle it)
             if (self.auth_mode or config.get("inband_auth")) and not self.host_key:
@@ -186,6 +190,12 @@ class NVMeInitiator(Initiator):
                             self.auth_mode = initiator.auth_mode
                         break
 
+            conn_args = {
+                "transport": "tcp",
+                "traddr": sub_endpoint["traddr"],
+                "trsvcid": sub_endpoint["trsvcid"],
+                "nqn": sub_endpoint["subnqn"],
+            }
             if self.auth_mode == "bidirectional":
                 if not self.host_key or not self.subsys_key:
                     raise Exception(
@@ -193,7 +203,7 @@ class NVMeInitiator(Initiator):
                         f"host_key={'set' if self.host_key else 'missing'}, "
                         f"subsys_key={'set' if self.subsys_key else 'missing'}"
                     )
-                sub_args.update(
+                conn_args.update(
                     {
                         "dhchap-secret": self.host_key,
                         "dhchap-ctrl-secret": self.subsys_key,
@@ -205,10 +215,10 @@ class NVMeInitiator(Initiator):
                         "Unidirectional auth requires host_key but it is not set. "
                         "Please ensure initiator is configured with authentication keys."
                     )
-                sub_args.update({"dhchap-secret": self.host_key})
-            _conn_cmd = {**cmd_args, **conn_port, **sub_args}
+                conn_args.update({"dhchap-secret": self.host_key})
 
-            LOG.debug(self.connect(**_conn_cmd))
+            LOG.debug(self.connect(**conn_args))
+        self.list()
 
     def gen_dhchap_key(self, **kwargs):
         """Generates the TLS key.
@@ -230,14 +240,46 @@ class NVMeInitiator(Initiator):
         LOG.debug(targets)
         return targets
 
-    def start_fio(self, io_size="100%", runtime=None, paths=None, **kwargs):
+    def stop_fio(self):
+        """Stop any running FIO processes on the client node.
+
+        Sends SIGTERM first to allow fio to flush, then SIGKILL after 5 seconds
+        if any processes remain.
+        """
+        LOG.info(f"Stopping FIO on node {self.node.hostname}")
+        try:
+            self.node.exec_command(cmd="pkill -SIGTERM fio", sudo=True)
+            sleep(5)
+        except Exception:
+            # pkill exits non-zero when no matching process is found; that is fine.
+            pass
+        try:
+            self.node.exec_command(cmd="pkill -9 fio", sudo=True)
+        except Exception:
+            pass
+        LOG.info(f"FIO stopped on node {self.node.hostname}")
+
+    def start_fio(
+        self, io_size="100%", runtime=None, paths=None, serial=False, **kwargs
+    ):
         """Start FIO on the all targets on client node.
 
         Args:
             io_size: Size of the IO to be performed
+            runtime: FIO runtime in seconds. When set, size is not sent to fio.
             paths: List of paths to perform IO on
+            serial (bool): When True, run fio on each path sequentially (one at
+                a time).  When False (default), all paths are spawned in parallel
+                via the thread pool.
+            stop_io (bool): When True, stop any running FIO processes on this
+                            node and return immediately without starting new IO.
             **kwargs: Additional arguments for FIO
         """
+        # Handle stop_io before any IO is set up.
+        if kwargs.get("stop_io"):
+            self.stop_fio()
+            return []
+
         if not paths:
             LOG.info("No paths provided, fetching all devices")
             paths = self.list_devices()
@@ -253,8 +295,7 @@ class NVMeInitiator(Initiator):
 
         if runtime:
             io_args.update({"run_time": runtime})
-
-        if io_size:
+        elif io_size:
             io_args.update({"size": io_size})
 
         # Update io_args if test_name is provided
@@ -281,41 +322,83 @@ class NVMeInitiator(Initiator):
         # For read only namespaces, blkdiscard is not required
         blkdiscard_cmd = kwargs.get("execute_blkdiscard", True)
 
-        # Use max_workers to ensure all FIO processes can start simultaneously
-        with parallel(max_workers=len(paths) + 4) as p:
-            for path in paths:
-                _io_args = {}
-                # TODO: blkdiscard is temporary workaround for same image usage
-                #  in the IO progression tasks especially HA failover and failback.
-                if blkdiscard_cmd:
-                    self.node.exec_command(cmd=f"blkdiscard {path}", sudo=True)
-                else:
-                    LOG.info(f"Skipping blkdiscard for {path}")
-                if io_args.get("test_name"):
-                    test_name = f"{io_args['test_name']}-" f"{path.replace('/', '_')}"
-                    _io_args.update({"test_name": test_name})
+        def _build_io_args(path):
+            _io_args = {}
+            if blkdiscard_cmd:
+                self.node.exec_command(cmd=f"blkdiscard {path}", sudo=True)
+            else:
+                LOG.info(f"Skipping blkdiscard for {path}")
+            if io_args.get("test_name"):
+                _io_args["test_name"] = (
+                    f"{io_args['test_name']}-{path.replace('/', '_')}"
+                )
+            _io_args.update(
+                {
+                    "device_name": path,
+                    "client_node": self.node,
+                    "long_running": True,
+                    "cmd_timeout": "notimeout",
+                    "verbose": True,
+                }
+            )
+            if kwargs.get("output_dir"):
                 _io_args.update(
                     {
-                        "device_name": path,
-                        "client_node": self.node,
-                        "long_running": True,
-                        "cmd_timeout": "notimeout",
-                        "verbose": True,
+                        "test_name": f"{kwargs['test_name']}-{path.replace('/', '_')}",
+                        "output_format": "json",
+                        "output_dir": kwargs["output_dir"],
                     }
                 )
-                if kwargs.get("output_dir"):
-                    test_name = f"{kwargs['test_name']}-" f"{path.replace('/', '_')}"
-                    _io_args.update(
-                        {
-                            "test_name": test_name,
-                            "output_format": "json",
-                            "output_dir": kwargs["output_dir"],
-                        }
+            return {**io_args, **_io_args}
+
+        if serial:
+            # Run fio on each path one at a time — no threads, no parallel context.
+            LOG.info("Running FIO serially on %d path(s)", len(paths))
+            for path in paths:
+                LOG.info("FIO on %s", path)
+                results.append(run_fio(**_build_io_args(path)))
+        else:
+            # Use max_workers to ensure all FIO processes can start simultaneously
+            with parallel(max_workers=len(paths) + 4) as p:
+                # Configure SSH MaxSessions to accommodate max_workers
+                max_workers = len(paths) + 4
+                required_sessions = max_workers + 10  # Add buffer for safety
+                try:
+                    # Backup original sshd_config
+                    self.node.exec_command(
+                        cmd="cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup",
+                        sudo=True,
                     )
-                _io_args = {**io_args, **_io_args}
-                p.spawn(run_fio, **_io_args)
-            for op in p:
-                results.append(op)
+
+                    # Update MaxSessions in sshd_config
+                    self.node.exec_command(
+                        cmd=f"sed -i 's/^#*MaxSessions.*/MaxSessions {required_sessions}/' /etc/ssh/sshd_config",
+                        sudo=True,
+                    )
+
+                    # Add MaxSessions if it doesn't exist
+                    self.node.exec_command(
+                        cmd=(
+                            f"grep -q '^MaxSessions' /etc/ssh/sshd_config || "
+                            f"echo 'MaxSessions {required_sessions}' >> /etc/ssh/sshd_config"
+                        ),
+                        sudo=True,
+                    )
+
+                    # Restart sshd service to apply changes
+                    self.node.exec_command(cmd="systemctl restart sshd", sudo=True)
+
+                    LOG.info(
+                        f"Configured SSH MaxSessions to {required_sessions} for max_workers={max_workers}"
+                    )
+                    sleep(3)  # To ensure sshd restarted
+                except Exception as e:
+                    LOG.warning(f"Failed to configure SSH MaxSessions: {e}")
+
+                for path in paths:
+                    p.spawn(run_fio, **_build_io_args(path))
+                for op in p:
+                    results.append(op)
         return results
 
     def register(self, base, register_args, nrkey, client_node):
@@ -548,6 +631,31 @@ def get_or_create_initiator(node_id, nqn, cluster):
         Initiators[key] = NVMeInitiator(node, nqn)
 
     return Initiators[key]
+
+
+def purge_cached_initiators(node_ids, cluster=None, disconnect=True):
+    """Drop cached initiators for nodes so a later test starts without leftover DHCHAP.
+
+    Intended for non-auth HA after an inband-auth test in the same process.
+    Does not alter prepare_io_execution behavior.
+
+    Args:
+        node_ids: Node ids to purge (e.g. ``{\"node14\"}``).
+        cluster: Ceph cluster (required when disconnect=True).
+        disconnect: Run ``nvme disconnect-all`` on each node before purge.
+    """
+    node_ids = set(node_ids)
+    if disconnect:
+        if cluster is None:
+            raise ValueError("cluster is required when disconnect=True")
+        for nid in node_ids:
+            try:
+                Initiator(get_node_by_id(cluster, nid)).disconnect_all()
+            except Exception as err:
+                LOG.warning("disconnect_all failed for node=%s: %s", nid, err)
+    for key in [k for k in Initiators if k[0] in node_ids]:
+        LOG.info("Purging cached initiator entry %s", key)
+        del Initiators[key]
 
 
 def prepare_io_execution(

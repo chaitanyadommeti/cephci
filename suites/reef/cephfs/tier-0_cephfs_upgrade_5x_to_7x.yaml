@@ -25,7 +25,7 @@ tests:
           - config:
               args:
                 rhcs-version: 5.3
-                release: rc
+                release: released
                 mon-ip: node1
                 orphan-initial-daemons: true
                 registry-url: registry.redhat.io
@@ -116,6 +116,14 @@ tests:
       destroy-cluster: false
       module: test_client.py
       name: "configure client"
+
+  - test:
+      name: Enable logging to file
+      module: rados_prep.py
+      config:
+        log_to_file: true
+      desc: Change config options to enable logging to file
+
   - test:
       abort-on-fail: false
       desc: Creates all the fs related components before upgrade
@@ -136,7 +144,6 @@ tests:
         - test:
             abort-on-fail: false
             config:
-              timeout: 30
             desc: Runs IOs in parallel with upgrade process
             module: cephfs_upgrade.cephfs_io.py
             name: "creation of Prerequisites for Upgrade"

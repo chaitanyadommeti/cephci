@@ -1,4 +1,5 @@
 import re
+from distutils.version import LooseVersion
 
 from ceph.ceph_admin.common import config_dict_to_string
 from ceph.nvmeof.cli.v2.common import substitute_keys
@@ -11,16 +12,34 @@ KEY_MAP = {
     "subsystem": "nqn",
     "host": "host_nqn",
     "host-nqn": "host_nqn",
+    "dhchap-ctrl-secret": "dhchap-controller-key",
+    "network-mask": "network_mask",
+    "serial-number": "serial_number",
+    "max-namespaces": "max_namespaces",
+    "no-group-append": "no-group-append",
     "rbd-pool": "rbd_pool",
     "rbd-image": "rbd_image_name",
+    "rbd-data-pool": "rbd_data_pool",
     "rbd-create-image": "create-image",
     "load-balancing-group": "load_balancing_group",
     "rbd-trash-image-on-delete": "trash-image",
+    "block-size": "block_size",
+    "rados-namespace": "rados_namespace",
+    "disable-auto-resize": "disable-auto-resize",
+    "no-auto-visible": "no-auto-visible",
+    "read-only": "read-only",
+    "clear-alerts": "clear-alerts",
+    "verify-host-name": "verify-host-name",
+    "host-name": "host_name",
     "rw-ios-per-second": "rw_ios_per_second",
     "rw-megabytes-per-second": "rw_mbytes_per_second",
     "r-megabytes-per-second": "r_mbytes_per_second",
     "w-megabytes-per-second": "w_mbytes_per_second",
     "level": "log_level",
+    "auto-visible": "auto_visible",
+    # BYOK LUKS encryption (9.2+)
+    # The CLI flags use hyphens: --encryption-format, --encryption-algorithm, --key-id
+    # No translation needed — pass through as-is.
 }
 
 
@@ -66,6 +85,7 @@ class BaseCLI:
             pass
 
         cmd_args = kwargs.get("args", {})
+        ceph_version = self.get_ceph_version()
 
         # Gateway group
         if not cmd_args.get("gw_group"):
@@ -78,6 +98,11 @@ class BaseCLI:
                 cmd_args["server_address"] = self.node.ip_address
             else:
                 cmd_args["traddr"] = self.node.ip_address
+
+        # Image size flag: --rbd-image-size (9.2+ / >= 20.2.1); --size (older)
+        if "rbd-image-size" in cmd_args:
+            if LooseVersion(ceph_version) < LooseVersion("20.2.1"):
+                cmd_args["size"] = cmd_args.pop("rbd-image-size")
 
         command = [
             self.BASE_CMD,

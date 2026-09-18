@@ -27,6 +27,7 @@ from ceph.utils import (
     create_baremetal_ceph_nodes,
     create_ceph_nodes,
     create_ibmc_ceph_nodes,
+    create_ocpvirt_ceph_nodes,
     create_onecloud_ceph_nodes,
 )
 from cephci.cluster_info import collect_ceph_coredumps, get_ceph_var_logs
@@ -38,6 +39,7 @@ from cli.performance.memory_and_cpu_utils import (
 )
 from compute.aws_ec2 import cleanup_aws_ceph_nodes
 from compute.onecloud import cleanup_onecloud_ceph_nodes, expand_private_key_path
+from compute.openshift import cleanup_ocpvirt_ceph_nodes, resolve_ocpvirt_credentials
 from utility import sosreport
 from utility.log import Log
 from utility.polarion import post_to_polarion
@@ -64,7 +66,7 @@ A simple test suite wrapper that executes tests based on yaml test configuration
         (--platform <name>)
         (--suite <FILE>)...
         (--global-conf FILE | --cluster-conf FILE)
-        [--cloud <openstack> | <ibmc> | <aws> | <baremetal> | <onecloud>]
+        [--cloud <openstack> | <ibmc> | <aws> | <baremetal> | <onecloud> | <ocpvirt>]
         [--build <name>]
         [--inventory FILE]
         [--osp-cred <file>]
@@ -112,7 +114,7 @@ Options:
   --global-conf <file>              global cloud configuration file
   --cluster-conf <file>             cluster configuration file
   --inventory <file>                hosts inventory file
-  --cloud <cloud_type>              cloud type (openstack|ibmc|aws|baremetal|onecloud) [default: openstack]
+  --cloud <cloud_type>              cloud type (openstack|ibmc|aws|baremetal|onecloud|ocpvirt) [default: openstack]
   --osp-cred <file>                 openstack credentials as separate file
   --rhbuild <1.3.0>                 ceph downstream version
                                     eg: 1.3.0, 2.0, 2.1 etc
@@ -211,6 +213,8 @@ def create_nodes(
 
             --custom-config ibmc_vpc=ci-vpc-01
             --custom-config ibmc_profile=bx2-2x8
+            --custom-config ocpvirt_namespace=rdu3_ceph_jenkins
+            --custom-config ocpvirt_profile=cx1.2xlarge  # optional; default o1.large
             --custom-config openstack_vm_profile=c1.standard.xl
             --custom-config openstack_networks=provider_net_cci_1
             --custom-config use_ipv6=true
@@ -230,6 +234,10 @@ def create_nodes(
         cleanup_aws_ceph_nodes(osp_cred, instances_name, custom_config=None)
     elif cloud_type == "onecloud":
         cleanup_onecloud_ceph_nodes(
+            osp_cred, instances_name, custom_config=custom_config
+        )
+    elif cloud_type == "ocpvirt":
+        cleanup_ocpvirt_ceph_nodes(
             osp_cred, instances_name, custom_config=custom_config
         )
 
@@ -263,6 +271,10 @@ def create_nodes(
                 instances_name,
                 custom_config,
                 platform=platform,
+            )
+        elif cloud_type == "ocpvirt":
+            ceph_vmnodes = create_ocpvirt_ceph_nodes(
+                cluster, inventory, osp_cred, run_id, instances_name, custom_config
             )
         elif "baremetal" in cloud_type:
             ceph_vmnodes = create_baremetal_ceph_nodes(cluster)
@@ -322,6 +334,12 @@ def create_nodes(
                 private_key_path = aws_cfg.get("private_key_path", "")
                 private_ip = node.ip_address
                 look_for_key = True
+                ceph_nodename = node.hostname
+            elif cloud_type == "ocpvirt":
+                ocp_cfg = resolve_ocpvirt_credentials(osp_cred, custom_config)
+                private_key_path = ocp_cfg.get("private_key_path", "")
+                private_ip = node.ip_address
+                look_for_key = bool(private_key_path)
                 ceph_nodename = node.hostname
             elif cloud_type == "onecloud":
                 private_ip = node.ip_address
@@ -580,6 +598,10 @@ def run(args):
             cleanup_onecloud_ceph_nodes(
                 osp_cred, cleanup_name, custom_config=args.get("--custom-config")
             )
+        elif cloud_type == "ocpvirt":
+            cleanup_ocpvirt_ceph_nodes(
+                osp_cred, cleanup_name, custom_config=args.get("--custom-config")
+            )
         else:
             log.warning("Unknown cloud type.")
 
@@ -591,7 +613,7 @@ def run(args):
     if (
         osp_cred_file is None
         and not reuse
-        and cloud_type in ["openstack", "ibmc", "aws"]
+        and cloud_type in ["openstack", "ibmc", "aws", "ocpvirt"]
     ):
         raise Exception("Require cloud credentials to create cluster.")
     if not reuse and cloud_type == "onecloud" and not osp_cred:
@@ -603,7 +625,7 @@ def run(args):
     if (
         inventory_file is None
         and not reuse
-        and cloud_type in ["openstack", "ibmc", "aws", "onecloud"]
+        and cloud_type in ["openstack", "ibmc", "aws", "onecloud", "ocpvirt"]
     ):
         raise Exception("Require system configuration information to provision.")
 
@@ -623,6 +645,7 @@ def run(args):
     ibm_build = False
     # disable coredump collection by default
     collect_coredump = False
+    crimson = False
 
     # Custom or override configurations
     kernel_repo = args.get("--kernel-repo")
@@ -646,6 +669,9 @@ def run(args):
 
             product = "ibm"
 
+    if "crimson" in custom_config_dict.keys():
+        crimson = bool(custom_config_dict["crimson"])
+
     # Setting to released by default is not right as there is case wherein it
     # would be unavailable. Hence switching accordingly to released or nightly.
     if build == "released":
@@ -657,7 +683,9 @@ def run(args):
             build = "nightly"
 
     # Now handle the manifest. At this point we are allowing failures
-    ctm: CephTestManifest = CephTestManifest(product, release, build, platform)
+    ctm: CephTestManifest = CephTestManifest(
+        product, release, build, platform, crimson=crimson
+    )
 
     base_url = args.get("--rhs-ceph-repo")
     docker_registry = args.get("--docker-registry")
@@ -699,8 +727,17 @@ def run(args):
     enable_eus = args.get("--enable-eus")
     skip_enabling_rhel_rpms = args.get("--skip-enabling-rhel-rpms")
     skip_sos_report = args.get("--skip-sos-report")
+
+    # Pre define the variables for coredump and logs collection.
+    # By default we don't collect any logs.
+    collect_coredump = False
+    collect_ceph_logs = False
+
     if "collect-coredump" in custom_config_dict.keys():
         collect_coredump = bool(custom_config_dict["collect-coredump"])
+
+    if "collect-ceph-logs" in custom_config_dict.keys():
+        collect_ceph_logs = bool(custom_config_dict["collect-ceph-logs"])
 
     # load config, suite and inventory yaml files
     conf = load_file(glb_file)
@@ -1187,6 +1224,10 @@ def run(args):
                 cleanup_onecloud_ceph_nodes(
                     osp_cred, instances_name, custom_config=custom_config
                 )
+            elif cloud_type == "ocpvirt":
+                cleanup_ocpvirt_ceph_nodes(
+                    osp_cred, instances_name, custom_config=custom_config
+                )
 
         if test.get("recreate-cluster") is True:
             ceph_cluster_dict, clients = create_nodes(
@@ -1288,10 +1329,18 @@ def run(args):
                 installer.password or "cephuser",
                 run_dir,
             )
-            # This can be Removed as sos report will have this details as well
-            get_ceph_var_logs(ceph_cluster_dict[cluster], run_dir)
 
         log.info(f"Generated sosreports location : {url_base}/sosreports\n")
+
+    if jenkins_rc or collect_ceph_logs:
+        log.info(
+            "\n\nCopying Ceph cluster logs due to failures in testcase or user instructed"
+        )
+        for cluster in ceph_cluster_dict.keys():
+            # method to collect logs from ceph nodes
+            get_ceph_var_logs(ceph_cluster_dict[cluster], run_dir)
+
+        log.info(f"Generated cluster log location : {url_base}/ceph_logs\n")
 
     return jenkins_rc
 
@@ -1317,37 +1366,59 @@ def collect_recipe(ceph_cluster):
     Returns:
         None
     """
-    version_datails = {}
+    version_details = {}
     installer_node = ceph_cluster.get_ceph_objects("installer")
     client_node = ceph_cluster.get_ceph_objects("client")
-    out, rc = installer_node[0].exec_command(
-        sudo=True, cmd="podman --version | awk {'print $3'}", check_ec=False
-    )
 
-    output = out.rstrip()
-    if output:
-        log.info(f"Podman Version {output}")
-        version_datails["PODMAN"] = output
+    if installer_node:
+        # podman version
+        out, _ = installer_node[0].exec_command(
+            sudo=True, cmd="podman --version | awk {'print $3'}", check_ec=False
+        )
 
-    out, _ = installer_node[0].exec_command(
-        sudo=True, cmd="docker --version | awk {'print $3'}", check_ec=False
-    )
-    output = out.rstrip()
-    if output:
-        log.info(f"Docker Version {output}")
-        version_datails["DOCKER"] = output
+        output = out.rstrip()
+        if output:
+            log.info(f"Podman Version {output}")
+            version_details["PODMAN"] = output
 
+        # docker version
+        out, _ = installer_node[0].exec_command(
+            sudo=True, cmd="docker --version | awk {'print $3'}", check_ec=False
+        )
+        output = out.rstrip()
+        if output:
+            log.info(f"Docker Version {output}")
+            version_details["DOCKER"] = output
+
+        # cephadm version
+        out, _ = installer_node[0].exec_command(
+            sudo=True, cmd="cephadm version", check_ec=False
+        )
+        output = out.rstrip()
+        if output:
+            log.info(f"cephadm Version: {output}")
     if client_node:
+        # client rpm version
         out, _ = client_node[0].exec_command(
             sudo=True, cmd="ceph --version | awk '{print $3}'", check_ec=False
         )
         output = out.rstrip()
-        log.info(f"ceph Version {output}")
-        version_datails["CEPH"] = output
+        if output:
+            log.info(f"ceph client rpm Version: {output}")
 
-    version_detail = open("version_info.json", "w+")
-    json.dump(version_datails, version_detail)
-    version_detail.close()
+        # ceph cluster version
+        out, _ = client_node[0].exec_command(
+            sudo=True, cmd="ceph version", check_ec=False
+        )
+        output = out.rstrip()
+        if output:
+            match = re.search(r"ceph version (\S+)", output)
+            short_version = match.group(1) if match else output
+            log.info(f"Ceph cluster Version: {output}")
+            version_details["CEPH"] = short_version
+
+    with open("version_info.json", "w") as version_detail:
+        json.dump(version_details, version_detail)
 
 
 if __name__ == "__main__":

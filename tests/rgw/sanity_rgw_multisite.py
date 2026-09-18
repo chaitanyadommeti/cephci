@@ -58,6 +58,7 @@ from utility.log import Log
 from utility.utils import (
     configure_kafka_cluster_with_security,
     configure_kafka_security,
+    copy_file_from_node_to_node,
     install_start_kafka,
     retain_bucket_pol_at_archive,
     set_config_param,
@@ -96,9 +97,6 @@ def run(**kw):
     config["git-url"] = config.get(
         "git-url", "https://github.com/red-hat-storage/ceph-qe-scripts.git"
     )
-    test_data = kw.get("test_data")
-    custom_config = test_data.get("custom-config", {})
-
     set_env = config.get("set-env", False)
     extra_pkgs = config.get("extra-pkgs")
     git_clone_configs_repo = config.get("git_clone_configs_repo", False)
@@ -206,10 +204,12 @@ def run(**kw):
     if git_clone_configs_repo:
         for i in range(0, len(primary_rgw_nodes)):
             utils.clone_configs_repo(primary_rgw_nodes[i].node, repo_name="rgw_configs")
+        utils.clone_configs_repo(primary_client_node, repo_name="rgw_configs")
         for i in range(0, len(secondary_rgw_nodes)):
             utils.clone_configs_repo(
                 secondary_rgw_nodes[i].node, repo_name="rgw_configs"
             )
+        utils.clone_configs_repo(secondary_client_node, repo_name="rgw_configs")
         if archive_cluster_exists:
             utils.clone_configs_repo(archive_rgw_node, repo_name="rgw_configs")
             utils.clone_configs_repo(archive_client_node, repo_name="rgw_configs")
@@ -250,8 +250,8 @@ def run(**kw):
     if install_start_kafka_broker_archive:
         install_start_kafka(archive_rgw_node, cloud_type)
     if configure_kafka_broker_security:
-        configure_kafka_security(primary_rgw_node, cloud_type)
-        configure_kafka_security(secondary_rgw_node, cloud_type)
+        configure_kafka_security(primary_cluster, cloud_type)
+        configure_kafka_security(secondary_cluster, cloud_type)
 
     configure_kafka_cluster = config.get("configure_kafka_cluster_with_security")
     if configure_kafka_cluster:
@@ -260,7 +260,7 @@ def run(**kw):
 
     setup_gklm_prerequisites = config.get("setup_gklm_prerequisites")
     if setup_gklm_prerequisites:
-        setup_gklm_prereq(primary_cluster, cloud_type, custom_config)
+        setup_gklm_prereq(primary_cluster, cloud_type)
         rgw_status = check_service_exists(
             primary_cluster.get_nodes(role="installer")[0],
             service_type="rgw",
@@ -269,7 +269,7 @@ def run(**kw):
         )
         if not rgw_status:
             raise Exception("rgw service restart failed")
-        setup_gklm_prereq(secondary_cluster, cloud_type, custom_config)
+        setup_gklm_prereq(secondary_cluster, cloud_type)
         rgw_status = check_service_exists(
             secondary_cluster.get_nodes(role="installer")[0],
             service_type="rgw",
@@ -463,55 +463,3 @@ def set_test_env(config, rgw_node):
             rgw_node.exec_command(
                 cmd=f"venv/bin/pip install -r {test_folder}/ceph-qe-scripts/rgw/requirements.txt"
             )
-
-
-def copy_file_from_node_to_node(src_file, src_node, dest_node, dest_file):
-    """
-    Copies file from one node to another node
-
-    :param src_file: filename to be copied
-    :param src_node: node to be copied from
-    :param dest_node: node to copied to
-    :param dest_file: destination filename
-
-    """
-    log.info(f"copying {src_file} from {src_node.ip_address} to {dest_node.ip_address}")
-    src_file_obj = read_file_from_node(src_file, src_node)
-    write_file_to_node(src_file_obj, dest_file, dest_node)
-
-
-def read_file_from_node(file_name, node):
-    """
-    read file_name from node and returns
-    remote_file object
-
-    :param file_name: file_name to read
-    :param node: ceph node
-    :return: remote file object
-    """
-
-    log.info(f"reading {file_name} from {node.ip_address}")
-    try:
-        file_obj = node.remote_file(
-            sudo=True, file_name=file_name, file_mode="r"
-        ).read()
-
-        return file_obj
-
-    except FileNotFoundError:
-        raise FileNotFoundError(f"file to read is missing here: {file_name}")
-
-
-def write_file_to_node(file_obj, file_name, node):
-    """
-    write to file from ceph node using remote_file obj
-    :param file_obj: remote_file object
-    :param file_name: destination file name
-    :param node: ceph node to write
-
-    """
-
-    log.info(f"write to {file_name} in node: {node.ip_address}")
-    dest_file_obj = node.remote_file(sudo=True, file_name=file_name, file_mode="w")
-    dest_file_obj.write(file_obj)
-    dest_file_obj.flush()

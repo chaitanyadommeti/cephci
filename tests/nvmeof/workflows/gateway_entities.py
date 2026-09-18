@@ -67,14 +67,14 @@ def validate_subsystems(nvme_service, subsystem_config):
         )
 
 
-def configure_subsystems(nvme_service, ceph_cluster=None):
+def configure_subsystems(nvme_service, ceph_cluster=None, subsystem_config=None):
     """
     Configure subsystems, hosts, and namespaces for this gateway group.
     This is done once per group, not per gateway.
     Args:
         nvme_service: NvmeService instance
-        exec_parallel: Whether to execute subsystem configuration in parallel
-        (default: False, sequential execution)
+        ceph_cluster: Ceph cluster object
+        subsystem_config: Optional subsystem list; defaults to nvme_service.config
     """
 
     # Configure subsystem
@@ -113,6 +113,8 @@ def configure_subsystems(nvme_service, ceph_cluster=None):
                 {"initiators": create_dhchap_key(sub_cfg, nvme_service.ceph_cluster)}
             )
             sub_args["dhchap-key"] = sub_cfg["dhchap-key"]
+        elif sub_cfg.get("dhchap-key"):
+            sub_args["dhchap-key"] = sub_cfg["dhchap-key"]
 
         # Add Subsystem
         release = nvme_service.ceph_cluster.rhcs_version
@@ -136,11 +138,17 @@ def configure_subsystems(nvme_service, ceph_cluster=None):
                 args["port"] = sub_cfg.get("listener_port")
             if sub_cfg.get("secure_listener"):
                 args["secure_listeners"] = sub_cfg.get("secure_listener")
-            args["network-mask"] = get_network_mask(nvme_service.gateways)
+            # Prefer suite-defined network-mask; else derive from GW primary IPs
+            args["network-mask"] = (
+                sub_cfg.get("network_mask")
+                or sub_cfg.get("network-mask")
+                or get_network_mask(nvme_service.gateways)
+            )
 
         gateway.subsystem.add(**{"args": args})
 
-    subsystem_config = nvme_service.config.get("subsystems", [])
+    if subsystem_config is None:
+        subsystem_config = nvme_service.config.get("subsystems", [])
     for sub_cfg in subsystem_config:
         with parallel() as p:
             p.spawn(configure_subsystem, nvme_service, sub_cfg)
@@ -358,12 +366,33 @@ def configure_namespaces(gateway, config, opt_args={}, rbd_obj=None):
                 if bdev_cfg.get("pool"):
                     namespace_args.update({"rbd-pool": bdev_cfg["pool"]})
 
+                data_pool = bdev_cfg.get("data_pool") or bdev_cfg.get("rbd-data-pool")
+                if data_pool:
+                    namespace_args.update({"rbd-data-pool": data_pool})
+
+                rados_namespace = bdev_cfg.get(
+                    "rados_namespace", sub_cfg.get("rados_namespace")
+                )
+                if rados_namespace:
+                    namespace_args.update({"rados-namespace": rados_namespace})
+
+                # BYOK LUKS encryption (9.2+) — all three keys are optional;
+                # absent means plain namespace (zero impact on existing callers).
+                if bdev_cfg.get("encryption-format"):
+                    namespace_args["encryption-format"] = bdev_cfg["encryption-format"]
+                if bdev_cfg.get("encryption-algorithm"):
+                    namespace_args["encryption-algorithm"] = bdev_cfg[
+                        "encryption-algorithm"
+                    ]
+                if bdev_cfg.get("key-id"):
+                    namespace_args["key-id"] = bdev_cfg["key-id"]
+
                 # consider adding option to create pool and image if it doesn't exist
                 # and also ns_create_image is false
                 if bdev_cfg.get("ns_create_image"):
                     namespace_args.update(
                         {
-                            "size": bdev_cfg.get("size", "1G"),
+                            "rbd-image-size": bdev_cfg.get("size", "1G"),
                             "rbd-create-image": bdev_cfg.get("ns_create_image", True),
                         }
                     )
@@ -374,12 +403,21 @@ def configure_namespaces(gateway, config, opt_args={}, rbd_obj=None):
                                 pool = bdev_cfg.get(
                                     "pool", config.get("rbd_pool", "rbd")
                                 )
-                                p.spawn(
-                                    rbd_obj.initial_rbd_config,
-                                    pool=pool,
-                                    image=f"{name}-image{num}",
-                                    size=bdev_cfg.get("size", "1G"),
-                                )
+                                image = f"{name}-image{num}"
+                                size = bdev_cfg.get("size", "1G")
+                                if data_pool:
+                                    cmd = (
+                                        f"rbd create {pool}/{image} --size {size} "
+                                        f"--data-pool {data_pool}"
+                                    )
+                                    p.spawn(rbd_obj.exec_cmd, cmd=cmd)
+                                else:
+                                    p.spawn(
+                                        rbd_obj.initial_rbd_config,
+                                        pool=pool,
+                                        image=image,
+                                        size=size,
+                                    )
                             else:
                                 raise ValueError(
                                     "RBD object not provided for pre-creating RBD image"
@@ -392,7 +430,6 @@ def configure_namespaces(gateway, config, opt_args={}, rbd_obj=None):
                         ns_args = deepcopy(namespace_args)
                         rbd_image = f"{name}-image{num}"
                         ns_args["rbd-image"] = rbd_image
-                        ns_args = {"args": ns_args}
                         if lb_groups:
                             if isinstance(lb_groups, dict):
                                 if bdev_cfg.get("lb_group"):
@@ -402,12 +439,39 @@ def configure_namespaces(gateway, config, opt_args={}, rbd_obj=None):
                                             bdev_cfg["lb_group"],
                                         ).hostname
                                     ]
-                                    ns_args.update({"load-balancing-group": lbgid})
-                            elif opt_args.get("lb_groups") == "sequential":
-                                lbgid = num
+                                    ns_args["load-balancing-group"] = lbgid
+                                    LOG.info(
+                                        f"NS {rbd_image}: load-balancing-group={lbgid} "
+                                        f"(lb_group={bdev_cfg['lb_group']})"
+                                    )
+                            elif (
+                                lb_groups == "sequential"
+                                or opt_args.get("lb_groups") == "sequential"
+                            ):
+                                # Sequential ANA groups are 1-based (GW ANA ids)
+                                ns_args["load-balancing-group"] = num + 1
+                                LOG.info(
+                                    f"NS {rbd_image}: load-balancing-group={num + 1} "
+                                    "(sequential)"
+                                )
                         expected_namespaces.append(rbd_image)
-                        p.spawn(gateway.namespace.add, **ns_args)
+                        p.spawn(gateway.namespace.add, **{"args": ns_args})
             validate_namespaces(gateway, expected_namespaces, nqn)
+
+
+def _hostnames_match(actual, expected):
+    """
+    Compare listener hostnames allowing short vs FQDN forms.
+
+    Baremetal cephci nodes often use ``hostname -s`` (e.g. tala010) while
+    NVMeoF auto-listeners register the cluster host FQDN
+    (e.g. tala010.ceph.tuc.ibm.com).
+    """
+    if actual == expected:
+        return True
+    if not actual or not expected:
+        return False
+    return str(actual).split(".")[0] == str(expected).split(".")[0]
 
 
 def validate_listeners(gateway, expected_listeners, nqn):
@@ -429,7 +493,9 @@ def validate_listeners(gateway, expected_listeners, nqn):
                 listener.get("traddr") == expected_listener.get("traddr")
                 and str(listener.get("trsvcid"))
                 == str(expected_listener.get("trsvcid"))
-                and listener.get("host_name") == expected_listener.get("host-name")
+                and _hostnames_match(
+                    listener.get("host_name"), expected_listener.get("host-name")
+                )
             ):
                 match_found = True
                 break
@@ -493,6 +559,18 @@ def configure_listeners(gateways, config: dict, listeners=None):
                 validate_listeners(gateway, expected_listeners, nqn)
 
 
+def _subsystems_request_lb_group(config):
+    """True when any bdev requests an explicit lb_group (ANA group)."""
+    for sub_cfg in config.get("subsystems", []) or []:
+        bdevs = sub_cfg.get("bdevs") or []
+        if isinstance(bdevs, dict):
+            bdevs = [bdevs]
+        for bdev in bdevs:
+            if bdev.get("lb_group"):
+                return True
+    return False
+
+
 def configure_gw_entities(nvme_service, rbd_obj=None, cluster=None):
     """
     Configure gateway entities for the NVMe service.
@@ -515,8 +593,23 @@ def configure_gw_entities(nvme_service, rbd_obj=None, cluster=None):
         configure_hosts(
             nvme_service.gateways[0], nvme_service.config, ceph_cluster=cluster
         )
+        opt_args = {}
+        if cluster and _subsystems_request_lb_group(nvme_service.config):
+            # Import locally to avoid circular imports at module load
+            from tests.nvmeof.workflows.nvme_utils import fetch_lb_groups
+
+            listeners = list(nvme_service.config.get("gw_nodes") or [])
+            for cfg in subsystem_config:
+                listeners.extend(cfg.get("listeners") or [])
+            listeners = list(dict.fromkeys(listeners))
+            lb_groups = fetch_lb_groups(nvme_service.gateways, listeners)
+            LOG.info(f"Applying namespace lb_groups from suite: {lb_groups}")
+            opt_args = {"ceph_cluster": cluster, "lb_groups": lb_groups}
         configure_namespaces(
-            nvme_service.gateways[0], nvme_service.config, rbd_obj=rbd_obj
+            nvme_service.gateways[0],
+            nvme_service.config,
+            opt_args=opt_args,
+            rbd_obj=rbd_obj,
         )
 
 
@@ -549,27 +642,39 @@ def teardown(nvme_service, rbd_obj, cleanup_config=None):
     if "initiators" in nvme_service.config.get("cleanup", []):
         disconnect_initiators(nvme_service)
 
-    # Delete the multiple subsystems across multiple gateways
+    # Delete the multiple subsystems across multiple gateways.
+    # Wrapped in try/except so that a "No such subsystem" error (e.g. when the
+    # test failed before the subsystem was ever created) does not abort teardown
+    # and leave the gateway service running — which would block the next test
+    # from deploying its own gateway on the same nodes.
     if "subsystems" in nvme_service.config["cleanup"]:
         config_sub_node = nvme_service.config["subsystems"]
         if not isinstance(config_sub_node, list):
             config_sub_node = [config_sub_node]
         for sub_cfg in config_sub_node:
             gateway = nvme_service.gateways[0]
-            out, err = gateway.subsystem.delete(
-                **{"args": {"subsystem": sub_cfg["nqn"], "force": True}}
-            )
-            if "success" not in out.lower():
-                LOG.warning(
-                    f"Failed to delete subsystem {sub_cfg['nqn']}: {out} with error {err}"
+            try:
+                out, err = gateway.subsystem.delete(
+                    **{"args": {"subsystem": sub_cfg["nqn"], "force": True}}
                 )
-                rc = 1
+                if "success" not in out.lower():
+                    LOG.warning(
+                        f"Failed to delete subsystem {sub_cfg['nqn']}: {out} with error {err}"
+                    )
+                    rc = 1
+            except Exception as exc:
+                LOG.warning(
+                    "Subsystem %s delete raised %s — skipping (subsystem may not exist yet)",
+                    sub_cfg["nqn"],
+                    exc,
+                )
 
-    # Delete gateways
+    # Delete gateways — always attempted even if subsystem cleanup above failed.
     if "gateway" in nvme_service.config.get("cleanup", []):
-        rc = nvme_service.delete_nvme_service()
-        if rc != 0:
+        gw_rc = nvme_service.delete_nvme_service()
+        if gw_rc != 0:
             LOG.warning("Failed to delete NVMe gateways")
+            rc = gw_rc
 
     # Delete the pool
     if "pool" in nvme_service.config["cleanup"]:
@@ -617,8 +722,12 @@ def fetch_namespaces(gateway, failed_ana_grp_ids=[], get_list=False):
         if failed_ana_grp_ids:
             for ns in nspaces:
                 if ns["load_balancing_group"] in failed_ana_grp_ids:
-                    # <subsystem>|<nsid>|<pool_name>|<image>
-                    ns_info = f"nsid-{ns['nsid']}|{ns['rbd_pool_name']}|{ns['rbd_image_name']}"
+                    # <subsystem>|<nsid>|<pool_name>|<image> or <subsystem>|<nsid>|<pool_name>|<rados_namespace>/<image>
+                    # Handle both {pool}/{image} and {pool}/{rados_namespace}/{image} formats
+                    image_path = ns["rbd_image_name"]
+                    if ns.get("rados_namespace_name"):
+                        image_path = f"{ns['rados_namespace_name']}/{image_path}"
+                    ns_info = f"nsid-{ns['nsid']}|{ns['rbd_pool_name']}|{image_path}"
                     if get_list:
                         namespaces.append({"list": ns, "info": f"{sub_name}|{ns_info}"})
                     else:

@@ -16,8 +16,8 @@ tests:
               command: bootstrap
               service: cephadm
               args:
-                rhcs-version: "9.0"
-                release: rc
+                rhcs-version: "9.1"
+                release: released
                 mon-ip: node1
                 orphan-initial-daemons: true
                 skip-monitoring-stack: true
@@ -82,8 +82,8 @@ tests:
       module: smb_upgrade_operations.py
       polarion-id: CEPH-83622441
       config:
-        deployment_version: 9.0
-        deployment_release: rc
+        deployment_version: 9.1
+        deployment_release: released
         operations:
           - deploy_smb
           - upgrade

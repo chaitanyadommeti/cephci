@@ -134,7 +134,7 @@ class FsUtils(object):
                 )
             if "iozone" not in out:
                 cmd_list = [
-                    "cd /home/cephuser;wget http://www.iozone.org/src/current/iozone3_506.tar;",
+                    "cd /home/cephuser;wget https://www.iozone.org/src/current/iozone3_506.tar;",
                     "cd /home/cephuser;tar xvf iozone3_506.tar",
                     "sudo yum install make -y --nogpgcheck",
                     "cd /home/cephuser/iozone3_506/src/current/;make;make linux",
@@ -906,23 +906,41 @@ class FsUtils(object):
         :return:
         """
         end_time = datetime.datetime.now() + datetime.timedelta(seconds=timeout)
-        log.info("Wait for the process to start or stop")
+        log.info(
+            "Wait for NFS process %s to reach state '%s'", process_name, desired_state
+        )
         while end_time > datetime.datetime.now():
             out, rc = client.exec_command(
                 sudo=True,
                 cmd="ceph orch ps --daemon_type=nfs --format json",
                 check_ec=False,
             )
-            nfs_hosts = json.loads(out.read().decode())
-            for nfs in nfs_hosts:
-                log.info(nfs)
-                if process_name in nfs["daemon_id"] and ispresent:
-                    if nfs["status_desc"] == desired_state:
-                        log.info(nfs)
+            try:
+                nfs_hosts = json.loads(out) if out else []
+            except (TypeError, json.JSONDecodeError):
+                log.debug("Unable to parse NFS orch ps output: %s", out)
+                sleep(interval)
+                continue
+            if not isinstance(nfs_hosts, list):
+                nfs_hosts = [nfs_hosts]
+            matching = [
+                nfs for nfs in nfs_hosts if process_name in nfs.get("daemon_id", "")
+            ]
+            if ispresent:
+                for nfs in matching:
+                    log.info(nfs)
+                    if nfs.get("status_desc") == desired_state:
+                        log.info("NFS process %s is %s", process_name, desired_state)
                         return True
-                if process_name not in nfs["daemon_id"] and not ispresent:
-                    return True
+            elif not matching:
+                log.info("NFS process %s is not present", process_name)
+                return True
             sleep(interval)
+        log.error(
+            "Timed out waiting for NFS process %s to reach state '%s'",
+            process_name,
+            desired_state,
+        )
         return False
 
     def wait_for_mds_deamon(
@@ -2361,23 +2379,44 @@ class FsUtils(object):
             )
         return 0
 
+    @retry(CommandFailed, tries=30, delay=10, backoff=1)
+    def _wait_for_pid_signal(self, node, daemon, sig, pids_before, expect_exit):
+        out_after, rc_after = node.exec_command(
+            cmd=f"pgrep {daemon}",
+            container_exec=False,
+            check_ec=False,
+        )
+        pids_after = out_after.splitlines() if not rc_after else []
+        still_running = set(pids_before) & set(pids_after)
+        log.info(
+            f"PIDs after {sig.name}: {pids_after}, "
+            f"still running from before: {still_running}"
+        )
+        if expect_exit and still_running:
+            raise CommandFailed(
+                f"{sig.name} failed. PIDs still running: {still_running}"
+            )
+        if not expect_exit and not pids_after:
+            raise CommandFailed(f"{sig.name} failed. {daemon} exited unexpectedly")
+
     def pid_signal(
         self,
         node,
         daemon,
         sig=signal.SIGTERM,
         expect_exit=True,
-        wait=10,
     ):
         out, rc = node.exec_command(
             cmd=f"pgrep {daemon}",
             container_exec=False,
             check_ec=False,
         )
-        if rc:
-            log.info(f"No running process found for {daemon}")
+        pids_before = [pid for pid in out.splitlines() if pid.strip()] if not rc else []
+        if not pids_before:
+            log.info(
+                f"No running {daemon} process found on {node.hostname}, skipping {sig.name}"
+            )
             return 0
-        pids_before = [pid for pid in out.splitlines() if pid]
         log.info(f"PIDs before {sig.name}: {pids_before}")
         for pid in pids_before:
             node.exec_command(
@@ -2386,23 +2425,7 @@ class FsUtils(object):
                 container_exec=False,
                 check_ec=False,
             )
-        sleep(wait)
-        out_after, rc_after = node.exec_command(
-            cmd=f"pgrep {daemon}",
-            container_exec=False,
-            check_ec=False,
-        )
-        pids_after = out_after.splitlines() if not rc_after else []
-        log.info(f"PIDs after {sig.name}: {pids_after}")
-        if expect_exit:
-            if set(pids_before) & set(pids_after):
-                raise CommandFailed(
-                    f"{sig.name} failed. PIDs still running: "
-                    f"{set(pids_before) & set(pids_after)}"
-                )
-        else:
-            if not pids_after:
-                raise CommandFailed(f"{sig.name} failed. {daemon} exited unexpectedly")
+        self._wait_for_pid_signal(node, daemon, sig, pids_before, expect_exit)
         return 0
 
     def network_disconnect(self, ceph_object, sleep_time=20):
@@ -3021,14 +3044,25 @@ os.system('sudo systemctl start  network')
                 "delete",
                 "cleanup",
             ]
-
+            rand_str = "".join(
+                random.choice(string.ascii_lowercase + string.digits)
+                for _ in list(range(3))
+            )
+            client.exec_command(
+                sudo=True,
+                cmd=f"mkdir -p /var/tmp/smallfile_dir_{rand_str}",
+                timeout=10,
+            )
             for op in operations:
                 cmd = (
                     f"python3 /home/cephuser/smallfile/smallfile_cli.py "
                     f"--operation {op} --threads 8 --file-size 10240 "
-                    f"--files 10 --top {mounting_dir}"
+                    f"--files 10 --top {mounting_dir} --network-sync-dir /var/tmp/smallfile_dir_{rand_str}"
                 )
                 client.exec_command(sudo=True, cmd=cmd, timeout=600)
+            client.exec_command(
+                sudo=True, cmd=f"rm -rf /var/tmp/smallfile_dir_{rand_str}"
+            )
 
         def file_extract():
             client.exec_command(
@@ -3147,14 +3181,22 @@ os.system('sudo systemctl start  network')
                 "delete",
                 "cleanup",
             ]
-
+            rand_str = "".join(
+                random.choice(string.ascii_lowercase + string.digits)
+                for _ in list(range(3))
+            )
+            client.exec_command(
+                sudo=True,
+                cmd=f"mkdir -p /var/tmp/smallfile_dir_{rand_str}",
+                timeout=10,
+            )
             for op in ops:
                 log.debug("Running smallfile operation: {}".format(op))
                 cmd = (
                     f"python3 /home/cephuser/smallfile/smallfile_cli.py "
                     f"--operation {op} --threads {io_params['threads']} "
                     f"--file-size {io_params['file-size']} --files {io_params['files']} "
-                    f"--top {io_path}"
+                    f"--top {io_path} --network-sync-dir /var/tmp/smallfile_dir_{rand_str}"
                 )
 
                 out, _ = client.exec_command(
@@ -3166,6 +3208,9 @@ os.system('sudo systemctl start  network')
                     )
                 )
                 time.sleep(3)
+            client.exec_command(
+                sudo=True, cmd=f"rm -rf /var/tmp/smallfile_dir_{rand_str}"
+            )
 
         def file_extract():
             log.info("IO tool scheduled : FILE_EXTRACT")

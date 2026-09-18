@@ -19,9 +19,9 @@ tests:
                     registry-url: registry.redhat.io
                     mon-ip: node1
                     rhcs-version: 6.1
-                    release: rc
+                    release: released
                     orphan-initial-daemons: true
-                    skip-monitoring-stack: true
+                    skip-monitoring-stack: false
               - config:
                   command: add_hosts
                   service: host
@@ -153,6 +153,13 @@ tests:
       name: configure client
 
   - test:
+      name: Enable logging to file
+      module: rados_prep.py
+      config:
+        log_to_file: true
+      desc: Change config options to enable logging to file
+
+  - test:
       abort-on-fail: false
       desc: "Pre-upgrade validate snapdiff perf on 10MB X 100 Files"
       clusters:
@@ -187,7 +194,6 @@ tests:
         - test:
             abort-on-fail: false
             config:
-              timeout: 30
               client_upgrade: 1
               client_upgrade_node: 'node7'
             desc: Runs IOs in parallel with upgrade process
@@ -238,7 +244,6 @@ tests:
         - test:
             abort-on-fail: false
             config:
-              timeout: 30
               client_upgrade: 1
               client_upgrade_node: 'node7'
             desc: Runs IOs in parallel with upgrade process

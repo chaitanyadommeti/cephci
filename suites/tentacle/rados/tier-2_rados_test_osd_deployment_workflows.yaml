@@ -114,15 +114,15 @@ tests:
   # backup host node5 is used to test OSD deployment workflows
   # Test modules of osd deployment workflows are expected to have host with osd-bak label
   - test:
-     name: Add backup host node5 ( host with osd-bak label) to test OSD deployment workflows
-     desc: Add backup host node5 to test OSD deployment workflows
-     module: test_hosts.py
-     config:
-       deploy_osd: false
-       scenario: add_host
-       nodes:
-         - node5
-     abort-on-fail: true
+      name: Add backup host node5 ( host with osd-bak label) to test OSD deployment workflows
+      desc: Add backup host node5 to test OSD deployment workflows
+      module: test_hosts.py
+      config:
+        deploy_osd: false
+        scenario: add_host
+        nodes:
+          - node5
+      abort-on-fail: true
 
   - test:
       name: 1 - OSD deployment tests - raw data device - spec file
@@ -178,6 +178,7 @@ tests:
   #       test_scenarios:
   #         - scenario5
   #     desc: OSD deployment tests - raw data and db device - spec file
+  #     comments: Intermittent bug IBMCEPH-13839
 
   # - test:
   #     name: 6 - OSD deployment tests - raw data, db and wal device - spec file
@@ -188,6 +189,7 @@ tests:
   #       test_scenarios:
   #         - scenario6
   #     desc: OSD deployment tests - raw data, db and wal device - spec file
+  #     comments: Intermittent bug IBMCEPH-13839
 
   - test:
       name: Case1_CLI - OSD deployment tests - raw data device
@@ -214,30 +216,28 @@ tests:
           - scenario2
       desc: OSD deployment tests - lvm data device - CLI
 
-  # Bugzilla - https://bugzilla.redhat.com/show_bug.cgi?id=2428878
-  # - test:
-  #     name: Case3_CLI - OSD deployment tests - lvm data and db device
-  #     module: osd_deploy_tests.py
-  #     polarion-id: CEPH-83632255
-  #     config:
-  #       deployment_type: cli
-  #       compressed: true
-  #       test_scenarios:
-  #         - scenario3
-  #     desc: OSD deployment tests -  lvm data and db device - CLI
+  - test:
+      name: Case3_CLI - OSD deployment tests - lvm data and db device
+      module: osd_deploy_tests.py
+      polarion-id: CEPH-83632255
+      config:
+        deployment_type: cli
+        compressed: true
+        test_scenarios:
+          - scenario3
+      desc: OSD deployment tests -  lvm data and db device - CLI
 
-  # Bugzilla - https://bugzilla.redhat.com/show_bug.cgi?id=2428878
-  # - test:
-  #     name: Case4_CLI - OSD deployment tests - lvm data, db and wal device
-  #     module: osd_deploy_tests.py
-  #     polarion-id: CEPH-83632255
-  #     config:
-  #       deployment_type: cli
-  #       test_scenarios:
-  #         - scenario4
-  #     desc: OSD deployment tests - lvm data, db and wal device - CLI
+  - test:
+      name: Case4_CLI - OSD deployment tests - lvm data, db and wal device
+      module: osd_deploy_tests.py
+      polarion-id: CEPH-83632255
+      config:
+        deployment_type: cli
+        test_scenarios:
+          - scenario4
+      desc: OSD deployment tests - lvm data, db and wal device - CLI
 
-  # Bugzilla - https://bugzilla.redhat.com/show_bug.cgi?id=2428878
+  # Bug - https://ibm-ceph.atlassian.net/browse/IBMCEPH-13839
   # - test:
   #     name: Case5_CLI - OSD deployment tests - raw data and db device
   #     module: osd_deploy_tests.py
@@ -247,8 +247,8 @@ tests:
   #       test_scenarios:
   #         - scenario5
   #     desc: OSD deployment tests - raw data and db device - CLI
+  #     comments: Intermittent bug IBMCEPH-13839
 
-  # Bugzilla - https://bugzilla.redhat.com/show_bug.cgi?id=2428878
   # - test:
   #     name: Case6_CLI - OSD deployment tests - raw data, db and wal device
   #     module: osd_deploy_tests.py
@@ -258,6 +258,7 @@ tests:
   #       test_scenarios:
   #         - scenario6
   #     desc: OSD deployment tests - raw data, db and wal device - CLI
+  #     comments: Intermittent bug IBMCEPH-13839
 
   - test:
       name: Remove the added backup host node5

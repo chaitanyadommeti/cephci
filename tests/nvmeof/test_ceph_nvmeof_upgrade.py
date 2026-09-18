@@ -214,6 +214,7 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
     overrides = kwargs.get("test_data", {}).get("custom_config_dict")
 
     io_tasks = []
+    initiator_objs = []
     executor = ThreadPoolExecutor()
 
     try:
@@ -241,10 +242,13 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
             initiator_obj = NVMeInitiator(client)
             initiator_obj.connect_targets(nvmegwcli, initiator)
             paths = initiator_obj.list_devices()
-            i = initiator_obj.start_fio(paths=paths, **initiator)
-            LOG.info(f"FIO Result: {i}")
+            LOG.info(f"Starting FIO in background on {client.hostname}, paths={paths}")
+            io_tasks.append(
+                executor.submit(initiator_obj.start_fio, paths=paths, **initiator)
+            )
+            initiator_objs.append(initiator_obj)
 
-        # Setup regisgtry
+        # Setup registry
         upg_cfg = {
             "release": upgrade.get("release") or config.get("rhbuild"),
             "cdn": upgrade["cdn"],
@@ -287,7 +291,10 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
         LOG.error(err)
     finally:
         if io_tasks:
-            LOG.info("Waiting for completion of IOs.")
+            LOG.info("Stopping background FIO on all initiator nodes.")
+            for initiator_obj in initiator_objs:
+                initiator_obj.stop_fio()
+            LOG.info("Shutting down IO executor.")
             executor.shutdown(wait=True, cancel_futures=True)
         if config.get("cleanup"):
             teardown(nvme_service, rbd_obj)

@@ -24,14 +24,16 @@ CEPH_CONF_PATH = "/etc/ceph/ceph.conf"
 CEPH_CLIENT_KEYRING_PATH = "/etc/ceph/ceph.client.admin.keyring"
 
 
-def autoload_registry_details(ibm_build=False):
+def autoload_registry_details(ibm_build=False, image=None, registry=None):
     """Get registry details
 
     Args:
         ibm_build (bool): Tag for IBM build
+        image (str): Container image reference used to select registry credentials
+        registry (str): Registry host/URL used to select registry credentials
     """
     # Get registry details
-    registry_details = get_registry_details(ibm_build)
+    registry_details = get_registry_details(ibm_build, registry=registry, image=image)
 
     # Update module arguments
     args = {}
@@ -144,6 +146,8 @@ def exec_cephadm_preflight(node, build_type, ibm_build=False, repo=None):
                 repo = repo.replace(repo.split("/")[-1], "rhel9/x86_64/")
             elif "rhel8" in repo:
                 repo = repo.replace(repo.split("/")[-1], "rhel8/x86_64/")
+            elif "rhel10" in repo:
+                repo = repo.replace(repo.split("/")[-1], "rhel10/x86_64/")
         extra_vars = {
             "ceph_origin": "custom",
             "gpgcheck": "no",

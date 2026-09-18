@@ -36,7 +36,7 @@ tests:
               service: cephadm
               args:
                 rhcs-version: "8.1"
-                release: rc
+                release: released
                 mon-ip: node1
                 orphan-initial-daemons: true
                 skip-monitoring-stack: true
@@ -113,8 +113,8 @@ tests:
           - nqn: nqn.2016-06.io.spdk:cnode1
             serial: 1
             bdevs:
-              - count: 8
-                size: 5G
+              - count: 4
+                size: 15G
                 ns_create_image: true
             listener_port: 4420
             allow_host: "*"

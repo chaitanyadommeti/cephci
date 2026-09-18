@@ -114,6 +114,9 @@ def run(ceph_cluster, **kw):
         abs_repo_path = f"{kernel_mounting_dir}{repo_path}"
 
         log.info("Cloning %s (branch giant) into %s", repo, abs_repo_path)
+        source_clients[0].exec_command(
+            sudo=True, cmd=f"rm -rf {abs_repo_path}", check_ec=False
+        )
         source_clients[0].exec_command(sudo=True, cmd=f"mkdir -p {abs_repo_dir}")
         source_clients[0].exec_command(
             sudo=True,
@@ -140,7 +143,7 @@ def run(ceph_cluster, **kw):
         # --- Retrieve mirror daemon identifiers for status queries ---
         fsid = fs_mirroring_utils.get_fsid(cephfs_mirror_node[0])
         daemon_names = fs_mirroring_utils.get_daemon_name(source_clients[0])
-        asok_files = fs_mirroring_utils.get_asok_file(
+        asok_files = fs_mirroring_utils.get_asok_file_with_connectivity_check(
             cephfs_mirror_node, fsid, daemon_names
         )
         filesystem_id = fs_mirroring_utils.get_filesystem_id_by_name(
@@ -382,9 +385,14 @@ def run(ceph_cluster, **kw):
 
         log.info("Remove path used for mirroring")
         if mirror_path:
-            fs_mirroring_utils.remove_path_from_mirroring(
-                source_clients[0], source_fs, mirror_path
-            )
+            try:
+                fs_mirroring_utils.remove_path_from_mirroring(
+                    source_clients[0], source_fs, mirror_path
+                )
+            except CommandFailed:
+                log.debug(
+                    "Mirror path %s was not tracked, skipping removal", mirror_path
+                )
 
         log.info("Destroy CephFS Mirroring setup.")
         fs_mirroring_utils.destroy_cephfs_mirroring(

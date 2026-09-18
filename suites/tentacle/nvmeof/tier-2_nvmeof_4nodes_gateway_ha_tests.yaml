@@ -173,7 +173,6 @@ tests:
       destroy-cluster: false
       module: test_ceph_nvmeof_high_availability.py
       name: NVMeoF 4-GW HA test with mTLS configuration
-      comments: product bug 2417229
       polarion-id: CEPH-83594616
 
   - test:
@@ -222,7 +221,7 @@ tests:
       destroy-cluster: false
       module: test_ceph_nvmeof_high_availability.py
       name: Switch NVMeoF with mTLS to Non-mTLS configuration
-      comments: product bug 2417229
+      comments: product bug IBMCEPH-14070
       polarion-id: CEPH-83595464
 
   # Non-mTLS Tests
@@ -891,7 +890,7 @@ tests:
         rbd_pool: rbd
         gw_group: gw_group1
         nvme_metadata_pool: rbd
-        iodepth: [4, 8, 16, 20, 24, 28, 32, 40, 48]  # list of IO depths to test
+        iodepth: [8, 16, 20, 24, 32]  # list of IO depths to test
         do_not_create_image: true
         rep-pool-only: true
         rep_pool_config:

@@ -204,7 +204,6 @@ tests:
             commands:
               - "sleep 120"
               - "radosgw-admin realm pull --rgw-realm india --url http://{node_ip:ceph-pri#node5}:80 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
-              - "radosgw-admin period pull --url http://{node_ip:ceph-pri#node5}:80 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
               - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone secondary --endpoints http://{node_ip:node5}:80 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
               - "radosgw-admin period update --rgw-realm india --commit"
               - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_realm india"
@@ -217,7 +216,6 @@ tests:
             commands:
               - "sleep 120"
               - "radosgw-admin realm pull --rgw-realm india --url http://{node_ip:ceph-pri#node5}:80 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
-              - "radosgw-admin period pull --url http://{node_ip:ceph-pri#node5}:80 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
               - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone archive --endpoints http://{node_ip:node5}:80 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --tier-type=archive"
               - "radosgw-admin zone modify  --rgw-realm india --rgw-zonegroup shared --rgw-zone archive  --sync-from-all false --sync-from-rm secondary --sync-from primary"
               - "radosgw-admin period update --rgw-realm india --commit"
@@ -257,6 +255,54 @@ tests:
       module: sanity_rgw_multisite.py
       name: create non-tenanted user
       polarion-id: CEPH-83575199
+
+  - test:
+      name: Test GET without CORS and origin
+      desc: Test GET without CORS and origin
+      polarion-id: CEPH-83632950
+      module: sanity_rgw_multisite.py
+      clusters:
+        ceph-pri:
+          config:
+            script-name: ../aws/test_cors_noconf_get_origin.py
+            config-file-name: ../../aws/configs/test_aws_cors_noconf_get_without_origin.yaml
+            verify-io-on-site: ["ceph-sec", "ceph-arc"]
+
+  - test:
+      name: Test GET without CORS and with origin
+      desc: Test GET without CORS and with origin
+      polarion-id: CEPH-83632950
+      module: sanity_rgw_multisite.py
+      clusters:
+        ceph-pri:
+          config:
+            script-name: ../aws/test_cors_noconf_get_origin.py
+            config-file-name: ../../aws/configs/test_aws_cors_noconf_get_with_origin.yaml
+            verify-io-on-site: ["ceph-sec", "ceph-arc"]
+
+  - test:
+      name: Test GET with CORS and without origin
+      desc: Test GET with CORS and without origin
+      polarion-id: CEPH-83632950
+      module: sanity_rgw_multisite.py
+      clusters:
+        ceph-pri:
+          config:
+            script-name: ../aws/test_cors_noconf_get_origin.py
+            config-file-name: ../../aws/configs/test_aws_cors_set_get_without_origin.yaml
+            verify-io-on-site: ["ceph-sec", "ceph-arc"]
+
+  - test:
+      name: Test GET with CORS and origin
+      desc: Test GET with CORS and origin
+      polarion-id: CEPH-83632950
+      module: sanity_rgw_multisite.py
+      clusters:
+        ceph-pri:
+          config:
+            script-name: ../aws/test_cors_noconf_get_origin.py
+            config-file-name: ../../aws/configs/test_aws_cors_set_get_with_origin.yaml
+            verify-io-on-site: ["ceph-sec", "ceph-arc"]
 
   - test:
       clusters:

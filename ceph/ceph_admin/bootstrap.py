@@ -31,11 +31,24 @@ __DEFAULT_KEYRING_PATH = "/etc/ceph/ceph.client.admin.keyring"
 __DEFAULT_SSH_PATH = "/etc/ceph/ceph.pub"
 
 
+def _detect_registry_tier(registry: str, build_type: str) -> str:
+    """Return credential tier (cdn/stage/preprod) from registry host, else from build_type."""
+    if not registry:
+        return "cdn" if build_type in ("released", "cdn") else "stage"
+    if "registry.redhat.io" in registry or "cp.icr.io" in registry:
+        return "cdn"
+    if "preprod.icr.io" in registry:
+        return "preprod"
+    if "stage" in registry or "stg" in registry or "quay" in registry:
+        return "stage"
+    return "cdn" if build_type in ("released", "cdn") else "stage"
+
+
 def construct_registry(
     cls,
     registry: str,
     json_file: bool = False,
-    ibm_build: bool = False,
+    product: str = "redhat",
     build_type: str = "released",
 ):
     """
@@ -45,8 +58,12 @@ def construct_registry(
         cls (CephAdmin): class object
         registry (Str): registry name
         json_file (Bool): registry credentials in JSON file (default:False)
-        ibm_build: flag to fetch IBM registry creds
+        product: ceph product - ibm/redhat
         build_type: CLI build type (released|cdn|stage|nightly etc.)
+
+    Registry tier is chosen from the registry hostname when it matches a known
+    RH/IBM host (cdn, stage, preprod); otherwise build_type is used
+    (released/cdn -> cdn, else stage).
 
     Example::
 
@@ -58,12 +75,18 @@ def construct_registry(
     Returns:
         constructed string of registry credentials ( Str )
     """
-    _vendor = "ibm" if ibm_build else "rh"
+    _vendor = "ibm" if "ibm" in product else "rh"
 
     _config = get_cephci_config()
-
-    # Determine the registry tier: "cdn" for released/cdn builds, "stage" otherwise
-    _tier = "cdn" if build_type in ("released", "cdn") else "stage"
+    _reg = registry if registry else ""
+    _tier = _detect_registry_tier(_reg, build_type)
+    logger.debug(
+        "Registry tier selection: registry=%r tier=%r build_type=%r vendor=%r",
+        _reg,
+        _tier,
+        build_type,
+        _vendor,
+    )
 
     # Prefer the nested credentials.registry.<vendor>.<tier> path which
     # carries separate entries for cdn (cp.icr.io) vs stage (cp.stg.icr.io).
@@ -76,8 +99,14 @@ def construct_registry(
         cdn_cred = _config.get(
             f"{_vendor}_registry_credentials", _config["cdn_credentials"]
         )
+        if _tier and _reg:
+            logger.warning(
+                "No credentials for registry tier '%s'; using legacy %s_registry_credentials",
+                _tier,
+                _vendor,
+            )
     reg_args = {
-        "registry-url": cdn_cred.get("registry", registry),
+        "registry-url": _reg or cdn_cred.get("registry"),
         "registry-username": cdn_cred.get("username"),
         "registry-password": cdn_cred.get("password"),
     }
@@ -314,37 +343,36 @@ class BootstrapMixin:
         registry_url = args.pop("registry-url", None)
         registry_json = args.pop("registry-json", None)
 
-        # Auto-detect registry from custom_image and add credentials if needed
-        if custom_image and not registry_url and not registry_json:
-            if isinstance(custom_image, str):
-                image_registry = custom_image.split("/")[0]
-            else:
-                image_registry = self.config["container_image"].split("/")[0]
+        # Auto-detect registry from custom_image or container image and add credentials if needed
+        if custom_image and isinstance(custom_image, str):
+            image_registry = custom_image.split("/")[0]
+        else:
+            image_registry = self.config["container_image"].split("/")[0]
 
-            # If using stage or production registry, auto-add credentials
-            if (
-                "registry.stage.redhat.io" in image_registry
-                or "registry.redhat.io" in image_registry
-            ):
-                registry_url = image_registry
-                logger.info(
-                    f"Auto-detected registry {registry_url} from custom image, adding credentials"
-                )
+        registry_url = image_registry
+        logger.info(
+            f"Auto-detected registry {registry_url} from container image, adding credentials"
+        )
 
         if registry_url or manifest_obj.product == "ibm":
             cmd += construct_registry(
                 self,
                 registry_url,
-                ibm_build=True if manifest_obj.product == "ibm" else False,
+                product=manifest_obj.product,
                 build_type=build_type,
             )
 
         if registry_json:
+            # Suite YAML often hardcodes registry.redhat.io for RH test_bootstrap
+            # cases; for IBM builds use the image registry host in registry-json.
+            json_registry = registry_json
+            if manifest_obj.product == "ibm" and image_registry:
+                json_registry = image_registry
             cmd += construct_registry(
                 self,
-                registry_json,
+                json_registry,
                 json_file=True,
-                ibm_build=True if manifest_obj.product == "ibm" else False,
+                product=manifest_obj.product,
                 build_type=build_type,
             )
 
